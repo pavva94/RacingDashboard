@@ -318,9 +318,268 @@ def create_gforce_map(df):
     return fig
 
 
+def extract_lap_data(df):
+    """Extract individual lap data from telemetry"""
+    if 'LAP_BEACON' not in df.columns:
+        return None
+
+    # Get unique laps and sort them
+    unique_laps = sorted(df['LAP_BEACON'].dropna().unique())
+
+    if len(unique_laps) < 2:
+        return None
+
+    lap_data = {}
+    for lap_num in unique_laps:
+        lap_df = df[df['LAP_BEACON'] == lap_num].copy()
+
+        if len(lap_df) > 10:  # Only include laps with sufficient data
+            # Reset time to start from 0 for each lap
+            lap_df['LAP_TIME'] = lap_df['Time'] - lap_df['Time'].iloc[0]
+
+            # Calculate lap statistics
+            lap_stats = {
+                'lap_number': lap_num,
+                'duration': lap_df['LAP_TIME'].max(),
+                'data': lap_df
+            }
+
+            if 'SPEED' in lap_df.columns:
+                lap_stats['max_speed'] = lap_df['SPEED'].max()
+                lap_stats['avg_speed'] = lap_df['SPEED'].mean()
+                lap_stats['min_speed'] = lap_df['SPEED'].min()
+
+            if 'THROTTLE' in lap_df.columns:
+                lap_stats['avg_throttle'] = lap_df['THROTTLE'].mean()
+                lap_stats['throttle_time'] = (lap_df['THROTTLE'] > 50).sum() / len(lap_df) * 100
+
+            if 'BRAKE' in lap_df.columns:
+                lap_stats['avg_brake'] = lap_df['BRAKE'].mean()
+                lap_stats['brake_time'] = (lap_df['BRAKE'] > 10).sum() / len(lap_df) * 100
+
+            if all(col in lap_df.columns for col in ['G_LAT', 'G_LON']):
+                lap_stats['max_lat_g'] = lap_df['G_LAT'].abs().max()
+                lap_stats['max_lon_g'] = lap_df['G_LON'].abs().max()
+                lap_stats['max_combined_g'] = np.sqrt(lap_df['G_LAT'] ** 2 + lap_df['G_LON'] ** 2).max()
+
+            lap_data[lap_num] = lap_stats
+
+    return lap_data
+
+
+def create_lap_comparison_charts(lap_data, selected_laps):
+    """Create comprehensive lap comparison visualizations"""
+    if not lap_data or len(selected_laps) < 2:
+        return None
+
+    # Filter selected laps
+    selected_data = {lap: lap_data[lap] for lap in selected_laps if lap in lap_data}
+
+    fig = make_subplots(
+        rows=3, cols=2,
+        subplot_titles=('Speed Comparison', 'Throttle vs Brake',
+                        'G-Force Comparison', 'Lap Time Analysis',
+                        'Cornering Analysis', 'Performance Metrics'),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"type": "bar"}],
+               [{"secondary_y": False}, {"type": "bar"}]]
+    )
+
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown']
+
+    # Speed comparison
+    for i, (lap_num, lap_info) in enumerate(selected_data.items()):
+        lap_df = sample_for_plotting(lap_info['data'], 1000)
+        if 'SPEED' in lap_df.columns:
+            fig.add_trace(
+                go.Scattergl(x=lap_df['LAP_TIME'], y=lap_df['SPEED'],
+                             name=f'Lap {lap_num}', mode='lines',
+                             line=dict(color=colors[i % len(colors)], width=2)),
+                row=1, col=1
+            )
+
+    # Throttle vs Brake comparison
+    for i, (lap_num, lap_info) in enumerate(selected_data.items()):
+        lap_df = sample_for_plotting(lap_info['data'], 800)
+        if 'THROTTLE' in lap_df.columns and 'BRAKE' in lap_df.columns:
+            fig.add_trace(
+                go.Scattergl(x=lap_df['THROTTLE'], y=lap_df['BRAKE'],
+                             mode='markers', name=f'Lap {lap_num} T/B',
+                             marker=dict(size=3, color=colors[i % len(colors)], opacity=0.6)),
+                row=1, col=2
+            )
+
+    # G-Force comparison
+    for i, (lap_num, lap_info) in enumerate(selected_data.items()):
+        lap_df = sample_for_plotting(lap_info['data'], 800)
+        if all(col in lap_df.columns for col in ['G_LAT', 'G_LON']):
+            fig.add_trace(
+                go.Scattergl(x=lap_df['G_LAT'], y=lap_df['G_LON'],
+                             mode='markers', name=f'Lap {lap_num} G',
+                             marker=dict(size=3, color=colors[i % len(colors)], opacity=0.6)),
+                row=2, col=1
+            )
+
+    # Lap time comparison
+    lap_times = [lap_info['duration'] for lap_info in selected_data.values()]
+    lap_labels = [f'Lap {lap}' for lap in selected_data.keys()]
+
+    fig.add_trace(
+        go.Bar(x=lap_labels, y=lap_times, name='Lap Times',
+               marker_color=colors[:len(lap_times)]),
+        row=2, col=2
+    )
+
+    # Cornering analysis (lateral G over time)
+    for i, (lap_num, lap_info) in enumerate(selected_data.items()):
+        lap_df = sample_for_plotting(lap_info['data'], 1000)
+        if 'G_LAT' in lap_df.columns:
+            fig.add_trace(
+                go.Scattergl(x=lap_df['LAP_TIME'], y=lap_df['G_LAT'].abs(),
+                             name=f'Lap {lap_num} |Lat G|', mode='lines',
+                             line=dict(color=colors[i % len(colors)], width=1)),
+                row=3, col=1
+            )
+
+    # Performance metrics comparison
+    metrics = ['max_speed', 'avg_throttle', 'max_combined_g']
+    metric_labels = ['Max Speed', 'Avg Throttle', 'Max G']
+
+    for j, metric in enumerate(metrics):
+        if all(metric in lap_info for lap_info in selected_data.values()):
+            values = [lap_info.get(metric, 0) for lap_info in selected_data.values()]
+            fig.add_trace(
+                go.Bar(x=lap_labels, y=values, name=metric_labels[j],
+                       marker_color=colors[j], opacity=0.7),
+                row=3, col=2
+            )
+
+    fig.update_layout(height=900, showlegend=True, title_text="Lap Comparison Analysis")
+
+    # Update axis labels
+    fig.update_xaxes(title_text="Lap Time (s)", row=1, col=1)
+    fig.update_yaxes(title_text="Speed (km/h)", row=1, col=1)
+    fig.update_xaxes(title_text="Throttle %", row=1, col=2)
+    fig.update_yaxes(title_text="Brake %", row=1, col=2)
+    fig.update_xaxes(title_text="Lateral G", row=2, col=1)
+    fig.update_yaxes(title_text="Longitudinal G", row=2, col=1)
+    fig.update_yaxes(title_text="Time (s)", row=2, col=2)
+    fig.update_xaxes(title_text="Lap Time (s)", row=3, col=1)
+    fig.update_yaxes(title_text="|Lateral G|", row=3, col=1)
+
+    return fig
+
+
+def create_lap_statistics_table(lap_data, selected_laps):
+    """Create a detailed statistics comparison table"""
+    if not lap_data or not selected_laps:
+        return None
+
+    stats_data = []
+    for lap_num in selected_laps:
+        if lap_num in lap_data:
+            lap_info = lap_data[lap_num]
+            stats_row = {
+                'Lap': f"Lap {lap_num}",
+                'Duration (s)': f"{lap_info.get('duration', 0):.2f}",
+                'Max Speed (km/h)': f"{lap_info.get('max_speed', 0):.1f}",
+                'Avg Speed (km/h)': f"{lap_info.get('avg_speed', 0):.1f}",
+                'Avg Throttle (%)': f"{lap_info.get('avg_throttle', 0):.1f}",
+                'Throttle Time (%)': f"{lap_info.get('throttle_time', 0):.1f}",
+                'Avg Brake (%)': f"{lap_info.get('avg_brake', 0):.1f}",
+                'Brake Time (%)': f"{lap_info.get('brake_time', 0):.1f}",
+                'Max Lat G': f"{lap_info.get('max_lat_g', 0):.2f}",
+                'Max Lon G': f"{lap_info.get('max_lon_g', 0):.2f}",
+                'Max Combined G': f"{lap_info.get('max_combined_g', 0):.2f}"
+            }
+            stats_data.append(stats_row)
+
+    return pd.DataFrame(stats_data)
+
+
+def create_sector_analysis(lap_data, selected_laps, num_sectors=3):
+    """Analyze lap performance by sectors"""
+    if not lap_data or len(selected_laps) < 2:
+        return None
+
+    sector_data = []
+
+    for lap_num in selected_laps:
+        if lap_num in lap_data:
+            lap_df = lap_data[lap_num]['data']
+            total_time = lap_df['LAP_TIME'].max()
+            sector_time = total_time / num_sectors
+
+            for sector in range(num_sectors):
+                start_time = sector * sector_time
+                end_time = (sector + 1) * sector_time
+
+                sector_df = lap_df[(lap_df['LAP_TIME'] >= start_time) &
+                                   (lap_df['LAP_TIME'] <= end_time)]
+
+                if len(sector_df) > 0:
+                    sector_info = {
+                        'Lap': f"Lap {lap_num}",
+                        'Sector': f"S{sector + 1}",
+                        'Time': end_time - start_time,
+                        'Avg_Speed': sector_df['SPEED'].mean() if 'SPEED' in sector_df else 0,
+                        'Max_Speed': sector_df['SPEED'].max() if 'SPEED' in sector_df else 0,
+                        'Avg_Throttle': sector_df['THROTTLE'].mean() if 'THROTTLE' in sector_df else 0
+                    }
+                    sector_data.append(sector_info)
+
+    if not sector_data:
+        return None
+
+    sector_df = pd.DataFrame(sector_data)
+
+    # Create sector comparison chart
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=('Sector Times', 'Sector Average Speed',
+                        'Sector Max Speed', 'Sector Throttle Usage')
+    )
+
+    # Group by sector for comparison
+    for sector in range(1, num_sectors + 1):
+        sector_name = f'S{sector}'
+        sector_subset = sector_df[sector_df['Sector'] == sector_name]
+
+        # Sector times
+        fig.add_trace(
+            go.Bar(x=sector_subset['Lap'], y=sector_subset['Time'],
+                   name=f'Sector {sector}', opacity=0.7),
+            row=1, col=1
+        )
+
+        # Average speeds
+        fig.add_trace(
+            go.Bar(x=sector_subset['Lap'], y=sector_subset['Avg_Speed'],
+                   name=f'S{sector} Avg Speed', opacity=0.7),
+            row=1, col=2
+        )
+
+        # Max speeds
+        fig.add_trace(
+            go.Bar(x=sector_subset['Lap'], y=sector_subset['Max_Speed'],
+                   name=f'S{sector} Max Speed', opacity=0.7),
+            row=2, col=1
+        )
+
+        # Throttle usage
+        fig.add_trace(
+            go.Bar(x=sector_subset['Lap'], y=sector_subset['Avg_Throttle'],
+                   name=f'S{sector} Throttle', opacity=0.7),
+            row=2, col=2
+        )
+
+    fig.update_layout(height=600, title_text=f"Sector Analysis ({num_sectors} Sectors)")
+    return fig, sector_df
+
+
 # Main Dashboard
 def main():
-    st.markdown('<h1 class="main-header">🏎️ Racing Telemetry Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🏎️ Racing Telemetry Dashboard (Optimized)</h1>', unsafe_allow_html=True)
 
     # Sidebar
     st.sidebar.header("📁 Data Upload")
@@ -380,10 +639,20 @@ def main():
                     min_speed = st.sidebar.number_input("Min Speed (km/h)", value=0.0)
                     df = df[df['SPEED'] >= min_speed]
 
+            # Extract lap data for comparison
+            lap_data = extract_lap_data(df)
+
             # Main content tabs
-            tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                "🏁 Performance", "🛞 Tires", "🟥 Brakes", "🌊 G-Forces", "📈 Data"
-            ])
+            if lap_data and len(lap_data) >= 2:
+                tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                    "🏁 Performance", "🛞 Tires", "🟥 Brakes", "🌊 G-Forces", "🏆 Lap Comparison", "📈 Data"
+                ])
+                has_lap_comparison = True
+            else:
+                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                    "🏁 Performance", "🛞 Tires", "🟥 Brakes", "🌊 G-Forces", "📈 Data"
+                ])
+                has_lap_comparison = False
 
             with tab1:
                 st.header("Performance Analysis")
@@ -451,7 +720,151 @@ def main():
                     else:
                         st.warning("G-force data not available in this dataset.")
 
-            with tab5:
+            # Lap Comparison Tab (only if lap data exists)
+            if has_lap_comparison:
+                with tab5:
+                    st.header("🏆 Lap Comparison Analysis")
+
+                    if lap_data and len(lap_data) >= 2:
+                        # Lap selection interface
+                        st.subheader("Select Laps to Compare")
+
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            available_laps = sorted(lap_data.keys())
+                            selected_laps = st.multiselect(
+                                "Choose laps for comparison:",
+                                available_laps,
+                                default=available_laps[:min(3, len(available_laps))],
+                                help="Select 2-6 laps for optimal comparison"
+                            )
+
+                        with col2:
+                            if selected_laps and len(selected_laps) >= 2:
+                                st.success(f"✅ {len(selected_laps)} laps selected for comparison")
+
+                                # Quick lap overview
+                                for lap in selected_laps[:3]:  # Show first 3
+                                    lap_info = lap_data[lap]
+                                    duration = lap_info.get('duration', 0)
+                                    max_speed = lap_info.get('max_speed', 0)
+                                    st.metric(f"Lap {lap}", f"{duration:.2f}s", f"Max: {max_speed:.0f} km/h")
+                            else:
+                                st.warning("Select at least 2 laps to compare")
+
+                        if selected_laps and len(selected_laps) >= 2:
+                            # Lap Statistics Overview
+                            st.subheader("📊 Lap Statistics Comparison")
+                            stats_table = create_lap_statistics_table(lap_data, selected_laps)
+                            if stats_table is not None:
+                                st.dataframe(stats_table, use_container_width=True)
+
+                            # Performance comparison charts
+                            st.subheader("📈 Performance Comparison")
+                            with st.spinner("Generating lap comparison charts..."):
+                                comparison_fig = create_lap_comparison_charts(lap_data, selected_laps)
+                                if comparison_fig:
+                                    st.plotly_chart(comparison_fig, use_container_width=True)
+
+                            # Sector Analysis
+                            st.subheader("🎯 Sector Analysis")
+                            col1, col2 = st.columns([1, 3])
+
+                            with col1:
+                                num_sectors = st.selectbox(
+                                    "Number of sectors:",
+                                    [3, 4, 5, 6],
+                                    index=0,
+                                    help="Divide each lap into sectors for detailed analysis"
+                                )
+
+                            with col2:
+                                with st.spinner("Analyzing sectors..."):
+                                    sector_fig, sector_data = create_sector_analysis(lap_data, selected_laps,
+                                                                                     num_sectors)
+                                    if sector_fig:
+                                        st.plotly_chart(sector_fig, use_container_width=True)
+
+                            # Sector data table
+                            if sector_data is not None:
+                                st.subheader("📋 Sector Performance Data")
+                                st.dataframe(sector_data, use_container_width=True)
+
+                                # Best sector times
+                                st.subheader("🏅 Best Sector Times")
+                                best_sectors = sector_data.groupby('Sector')['Time'].min().reset_index()
+                                best_sectors['Best_Lap'] = sector_data.loc[
+                                    sector_data.groupby('Sector')['Time'].idxmin(), 'Lap'
+                                ].values
+                                best_sectors.columns = ['Sector', 'Best Time (s)', 'Best Lap']
+                                st.dataframe(best_sectors, use_container_width=True)
+
+                            # Lap improvement suggestions
+                            st.subheader("💡 Performance Insights")
+
+                            if len(selected_laps) >= 2:
+                                # Find fastest and slowest lap
+                                lap_times = {lap: lap_data[lap]['duration'] for lap in selected_laps}
+                                fastest_lap = min(lap_times.keys(), key=lambda x: lap_times[x])
+                                slowest_lap = max(lap_times.keys(), key=lambda x: lap_times[x])
+
+                                time_diff = lap_times[slowest_lap] - lap_times[fastest_lap]
+
+                                col1, col2, col3 = st.columns(3)
+
+                                with col1:
+                                    st.info(f"🥇 **Fastest Lap**: {fastest_lap}\n\nTime: {lap_times[fastest_lap]:.3f}s")
+
+                                with col2:
+                                    st.info(f"🐌 **Slowest Lap**: {slowest_lap}\n\nTime: {lap_times[slowest_lap]:.3f}s")
+
+                                with col3:
+                                    st.info(f"⏱️ **Time Difference**: {time_diff:.3f}s\n\nImprovement potential!")
+
+                                # Performance recommendations
+                                st.markdown("### 🎯 Improvement Opportunities")
+
+                                fastest_data = lap_data[fastest_lap]
+                                slowest_data = lap_data[slowest_lap]
+
+                                recommendations = []
+
+                                if 'max_speed' in fastest_data and 'max_speed' in slowest_data:
+                                    speed_diff = fastest_data['max_speed'] - slowest_data['max_speed']
+                                    if speed_diff > 5:
+                                        recommendations.append(
+                                            f"🚀 Top speed: Fastest lap achieved {speed_diff:.1f} km/h higher max speed")
+
+                                if 'avg_throttle' in fastest_data and 'avg_throttle' in slowest_data:
+                                    throttle_diff = fastest_data['avg_throttle'] - slowest_data['avg_throttle']
+                                    if abs(throttle_diff) > 5:
+                                        if throttle_diff > 0:
+                                            recommendations.append(
+                                                f"⚡ Throttle: Fastest lap used {throttle_diff:.1f}% more throttle on average")
+                                        else:
+                                            recommendations.append(
+                                                f"🎮 Throttle: Fastest lap used {abs(throttle_diff):.1f}% less throttle - better efficiency")
+
+                                if 'max_combined_g' in fastest_data and 'max_combined_g' in slowest_data:
+                                    g_diff = fastest_data['max_combined_g'] - slowest_data['max_combined_g']
+                                    if g_diff > 0.1:
+                                        recommendations.append(
+                                            f"🌪️ Cornering: Fastest lap pulled {g_diff:.2f}g more - better cornering speed")
+
+                                if recommendations:
+                                    for rec in recommendations:
+                                        st.success(rec)
+                                else:
+                                    st.info("Laps are very similar - focus on consistency and small optimizations!")
+
+                    else:
+                        st.warning("Lap comparison requires at least 2 complete laps with LAP_BEACON data.")
+                        st.info("Make sure your CSV file contains a 'LAP_BEACON' column with lap numbers.")
+
+            # Data tab (always last)
+            data_tab = tab6 if has_lap_comparison else tab5
+            with data_tab:
                 st.header("Data Explorer")
 
                 # Show current sample info
