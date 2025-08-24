@@ -1,0 +1,49 @@
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Node modules
+node_modules/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+out/
+
+# Dependency directories
+/.pnp
+.pnp.js
+
+# Cache directories
+.cache/
+.parcel-cache/
+.next/
+.nyc_output/
+coverage/
+.vscode/
+
+# Editor directories and files
+*.swp
+.sass-cache/
+*.idea/
+*.vscode/
+*.DS_Store
+*.class
+
+# Git files
+.git/
+.gitignore
+
+# System-specific files
+Thumbs.db
+.DS_Store
+desktop.ini
