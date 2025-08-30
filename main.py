@@ -987,8 +987,8 @@ def create_gforce_map(df):
     return fig
 
 
-def extract_lap_data(df):
-    """Extract individual lap data from telemetry"""
+def extract_lap_data(df, num_sectors=3):
+    """Extract individual lap data from telemetry with sector analysis"""
     if 'LAP_BEACON' not in df.columns:
         return None
 
@@ -1010,8 +1010,28 @@ def extract_lap_data(df):
             lap_stats = {
                 'lap_number': lap_num,
                 'duration': lap_df['LAP_TIME'].max(),
-                'data': lap_df
+                'data': lap_df,
+                'sectors': {}
             }
+
+            # Calculate sector times
+            total_time = lap_df['LAP_TIME'].max()
+            sector_time = total_time / num_sectors
+
+            for sector in range(num_sectors):
+                start_time = sector * sector_time
+                end_time = (sector + 1) * sector_time
+
+                sector_df = lap_df[(lap_df['LAP_TIME'] >= start_time) &
+                                   (lap_df['LAP_TIME'] <= end_time)]
+
+                if len(sector_df) > 0:
+                    lap_stats['sectors'][f'S{sector + 1}'] = {
+                        'time': end_time - start_time,
+                        'avg_speed': sector_df['SPEED'].mean() if 'SPEED' in sector_df else 0,
+                        'max_speed': sector_df['SPEED'].max() if 'SPEED' in sector_df else 0,
+                        'avg_throttle': sector_df['THROTTLE'].mean() if 'THROTTLE' in sector_df else 0
+                    }
 
             if 'SPEED' in lap_df.columns:
                 lap_stats['max_speed'] = lap_df['SPEED'].max()
@@ -1034,6 +1054,137 @@ def extract_lap_data(df):
             lap_data[lap_num] = lap_stats
 
     return lap_data
+
+
+def create_lap_times_table_with_sectors(lap_data, num_sectors=3):
+    """Create a comprehensive lap times table with sector analysis and highlighting"""
+    if not lap_data:
+        return None
+
+    # Prepare data for the table
+    table_data = []
+
+    for lap_num, lap_info in lap_data.items():
+        row = {
+            'Lap': int(lap_num),
+            'Lap Time': f"{lap_info['duration']:.3f}s"
+        }
+
+        # Add sector times
+        total_sector_time = 0
+        for sector in range(1, num_sectors + 1):
+            sector_key = f'S{sector}'
+            if sector_key in lap_info.get('sectors', {}):
+                sector_time = lap_info['sectors'][sector_key]['time']
+                row[f'Sector {sector}'] = f"{sector_time:.3f}s"
+                total_sector_time += sector_time
+            else:
+                row[f'Sector {sector}'] = "N/A"
+
+        # Add performance metrics
+        row['Max Speed'] = f"{lap_info.get('max_speed', 0):.1f}"
+        row['Avg Speed'] = f"{lap_info.get('avg_speed', 0):.1f}"
+        row['Avg Throttle'] = f"{lap_info.get('avg_throttle', 0):.1f}%"
+
+        table_data.append(row)
+
+    # Convert to DataFrame
+    df_table = pd.DataFrame(table_data)
+
+    # Sort by lap number
+    df_table = df_table.sort_values('Lap')
+
+    return df_table
+
+
+def create_lap_times_chart(lap_data):
+    """Create lap times progression chart"""
+    if not lap_data or len(lap_data) < 2:
+        return None
+
+    # Prepare data
+    laps = []
+    times = []
+
+    for lap_num, lap_info in sorted(lap_data.items()):
+        laps.append(int(lap_num))
+        times.append(lap_info['duration'])
+
+    # Find best lap time for highlighting
+    best_time = min(times)
+    best_lap_idx = times.index(best_time)
+
+    # Create colors array (highlight best lap)
+    colors = ['lightblue'] * len(times)
+    colors[best_lap_idx] = 'gold'
+
+    fig = go.Figure()
+
+    # Add bar chart
+    fig.add_trace(go.Bar(
+        x=laps,
+        y=times,
+        name='Lap Times',
+        marker_color=colors,
+        text=[f"{t:.3f}s" for t in times],
+        textposition='outside'
+    ))
+
+    # Add best lap line
+    fig.add_hline(y=best_time, line_dash="dash", line_color="green",
+                  annotation_text=f"Best: {best_time:.3f}s")
+
+    # Add average line
+    avg_time = sum(times) / len(times)
+    fig.add_hline(y=avg_time, line_dash="dot", line_color="orange",
+                  annotation_text=f"Average: {avg_time:.3f}s")
+
+    fig.update_layout(
+        title="Lap Times Progression",
+        xaxis_title="Lap Number",
+        yaxis_title="Time (seconds)",
+        height=400,
+        showlegend=False
+    )
+
+    return fig
+
+
+def highlight_best_sectors_and_times(df_table, num_sectors=3):
+    """Apply styling to highlight best sectors and lap times"""
+    if df_table is None or df_table.empty:
+        return None
+
+    # Create a copy for styling
+    styled_df = df_table.copy()
+
+    # Find best lap time (convert back to float for comparison)
+    lap_times = []
+    for time_str in df_table['Lap Time']:
+        if 'N/A' not in str(time_str):
+            lap_times.append(float(time_str.replace('s', '')))
+        else:
+            lap_times.append(float('inf'))
+
+    best_lap_time = min(lap_times) if lap_times else 0
+    best_lap_idx = lap_times.index(best_lap_time) if lap_times else -1
+
+    # Find best sector times
+    best_sectors = {}
+    for sector in range(1, num_sectors + 1):
+        sector_col = f'Sector {sector}'
+        if sector_col in df_table.columns:
+            sector_times = []
+            for time_str in df_table[sector_col]:
+                if 'N/A' not in str(time_str):
+                    sector_times.append(float(time_str.replace('s', '')))
+                else:
+                    sector_times.append(float('inf'))
+
+            if sector_times:
+                best_sectors[sector_col] = min(sector_times)
+
+    return styled_df, best_lap_idx, best_sectors
 
 
 def create_lap_comparison_charts(lap_data, selected_laps):
@@ -1319,7 +1470,7 @@ def main():
                     df = df[df['SPEED'] >= min_speed]
 
             # Extract lap data for comparison
-            lap_data = extract_lap_data(df)
+            lap_data = extract_lap_data(df, 3)
 
             # Main content tabs
             if lap_data and len(lap_data) >= 2:
@@ -1351,7 +1502,142 @@ def main():
                     if 'BRAKE' in df.columns:
                         st.metric("Avg Brake", f"{df['BRAKE'].mean():.1f}%")
 
+                # Lap Times Analysis Section (NEW)
+                if lap_data and len(lap_data) >= 2:
+                    st.subheader("Lap Times & Sector Analysis")
+
+                    # Sector configuration
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        num_sectors = st.selectbox(
+                            "Sectors per lap:",
+                            [3, 4, 5],
+                            index=0,
+                            key="perf_sectors",
+                            help="Number of sectors to divide each lap"
+                        )
+
+                    # Re-extract lap data with selected number of sectors
+                    with st.spinner("Calculating sector times..."):
+                        lap_data_with_sectors = extract_lap_data(df, num_sectors)
+
+                    if lap_data_with_sectors:
+                        # Create lap times table
+                        lap_table = create_lap_times_table_with_sectors(lap_data_with_sectors, num_sectors)
+
+                        if lap_table is not None:
+                            # Style the table to highlight best times
+                            styled_table, best_lap_idx, best_sectors = highlight_best_sectors_and_times(lap_table, num_sectors)
+
+                            # Display metrics for best performance
+                            col1, col2, col3 = st.columns(3)
+
+                            with col1:
+                                if best_lap_idx >= 0:
+                                    best_lap_num = lap_table.iloc[best_lap_idx]['Lap']
+                                    best_time = lap_table.iloc[best_lap_idx]['Lap Time']
+                                    st.success(f"**Best Lap**: {best_lap_num}\n\n**Time**: {best_time}")
+
+                            with col2:
+                                if len(lap_table) > 1:
+                                    all_times = [float(t.replace('s', '')) for t in lap_table['Lap Time'] if 'N/A' not in str(t)]
+                                    if all_times:
+                                        avg_time = sum(all_times) / len(all_times)
+                                        st.info(f"**Average Lap**: {avg_time:.3f}s")
+
+                            with col3:
+                                if len(lap_table) > 1:
+                                    all_times = [float(t.replace('s', '')) for t in lap_table['Lap Time'] if 'N/A' not in str(t)]
+                                    if all_times:
+                                        consistency = np.std(all_times)
+                                        st.info(f"**Consistency**: ±{consistency:.3f}s")
+
+                            # Display the table with custom formatting
+                            st.markdown("### Lap Times & Sectors Table")
+
+                            # Convert table to HTML for better formatting
+                            def style_lap_table(df_table, best_lap_idx, best_sectors, num_sectors):
+                                """Apply HTML styling to highlight best times"""
+                                html = "<table style='width:100%; border-collapse: collapse;'>"
+
+                                # Header
+                                html += "<tr style='background-color: #f0f0f0; font-weight: bold;'>"
+                                for col in df_table.columns:
+                                    html += f"<th style='border: 1px solid #ddd; padding: 8px; text-align: center;'>{col}</th>"
+                                html += "</tr>"
+
+                                # Rows
+                                for idx, row in df_table.iterrows():
+                                    row_style = "background-color: #fff9c4;" if idx == best_lap_idx else ""
+                                    html += f"<tr style='{row_style}'>"
+
+                                    for col_idx, (col, value) in enumerate(row.items()):
+                                        cell_style = "border: 1px solid #ddd; padding: 8px; text-align: center;"
+
+                                        # Highlight best sectors
+                                        if col.startswith('Sector') and col in best_sectors:
+                                            if 'N/A' not in str(value):
+                                                current_time = float(str(value).replace('s', ''))
+                                                if abs(current_time - best_sectors[col]) < 0.001:
+                                                    cell_style += " background-color: #90EE90; font-weight: bold;"
+
+                                        # Highlight best lap time
+                                        if col == 'Lap Time' and idx == best_lap_idx:
+                                            cell_style += " background-color: #FFD700; font-weight: bold;"
+
+                                        html += f"<td style='{cell_style}'>{value}</td>"
+
+                                    html += "</tr>"
+
+                                html += "</table>"
+                                return html
+
+                            # Display styled table
+                            table_html = style_lap_table(lap_table, best_lap_idx, best_sectors, num_sectors)
+                            st.markdown(table_html, unsafe_allow_html=True)
+
+                            # Add legend
+                            st.markdown("""
+                            <div style='margin-top: 10px; font-size: 0.9em;'>
+                            <span style='background-color: #FFD700; padding: 2px 6px; border-radius: 3px;'>Gold = Best Lap Time</span> | 
+                            <span style='background-color: #90EE90; padding: 2px 6px; border-radius: 3px;'>Green = Best Sector Time</span> | 
+                            <span style='background-color: #fff9c4; padding: 2px 6px; border-radius: 3px;'>Yellow = Best Overall Lap</span>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                            # Lap progression chart
+                            st.subheader("Lap Time Progression")
+                            lap_chart = create_lap_times_chart(lap_data_with_sectors)
+                            if lap_chart:
+                                st.plotly_chart(lap_chart, use_container_width=True)
+
+                            # Best sectors summary
+                            st.subheader("Best Sector Times Summary")
+                            best_sector_data = []
+                            for sector in range(1, num_sectors + 1):
+                                sector_col = f'Sector {sector}'
+                                if sector_col in best_sectors:
+                                    # Find which lap achieved this best sector
+                                    best_time = best_sectors[sector_col]
+                                    best_lap = None
+                                    for _, row in lap_table.iterrows():
+                                        if 'N/A' not in str(row[sector_col]):
+                                            if abs(float(row[sector_col].replace('s', '')) - best_time) < 0.001:
+                                                best_lap = row['Lap']
+                                                break
+
+                                    best_sector_data.append({
+                                        'Sector': f'Sector {sector}',
+                                        'Best Time': f"{best_time:.3f}s",
+                                        'Achieved in Lap': best_lap or 'Unknown'
+                                    })
+
+                            if best_sector_data:
+                                best_sectors_df = pd.DataFrame(best_sector_data)
+                                st.dataframe(best_sectors_df, use_container_width=True, hide_index=True)
+
                 # Fast performance charts
+                st.subheader("Telemetry Analysis")
                 with st.spinner("Generating performance charts..."):
                     speed_fig = create_fast_speed_analysis(df)
                     if speed_fig:
