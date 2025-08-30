@@ -1056,6 +1056,16 @@ def extract_lap_data(df, num_sectors=3):
     return lap_data
 
 
+def format_time_mmss(seconds):
+    """Convert seconds to mm:ss.xxx format"""
+    if seconds is None or seconds <= 0:
+        return "N/A"
+
+    minutes = int(seconds // 60)
+    remaining_seconds = seconds % 60
+    return f"{minutes:02d}:{remaining_seconds:06.3f}"
+
+
 def create_lap_times_table_with_sectors(lap_data, num_sectors=3):
     """Create a comprehensive lap times table with sector analysis and highlighting"""
     if not lap_data:
@@ -1067,7 +1077,7 @@ def create_lap_times_table_with_sectors(lap_data, num_sectors=3):
     for lap_num, lap_info in lap_data.items():
         row = {
             'Lap': int(lap_num),
-            'Lap Time': f"{lap_info['duration']:.3f}s"
+            'Lap Time': format_time_mmss(lap_info['duration'])
         }
 
         # Add sector times
@@ -1076,7 +1086,7 @@ def create_lap_times_table_with_sectors(lap_data, num_sectors=3):
             sector_key = f'S{sector}'
             if sector_key in lap_info.get('sectors', {}):
                 sector_time = lap_info['sectors'][sector_key]['time']
-                row[f'Sector {sector}'] = f"{sector_time:.3f}s"
+                row[f'Sector {sector}'] = format_time_mmss(sector_time)
                 total_sector_time += sector_time
             else:
                 row[f'Sector {sector}'] = "N/A"
@@ -1150,6 +1160,23 @@ def create_lap_times_chart(lap_data):
     return fig
 
 
+def parse_time_to_seconds(time_str):
+    """Convert mm:ss.xxx format back to seconds"""
+    if 'N/A' in str(time_str):
+        return float('inf')
+
+    try:
+        parts = str(time_str).split(':')
+        if len(parts) == 2:
+            minutes = int(parts[0])
+            seconds = float(parts[1])
+            return minutes * 60 + seconds
+        else:
+            return float('inf')
+    except:
+        return float('inf')
+
+
 def highlight_best_sectors_and_times(df_table, num_sectors=3):
     """Apply styling to highlight best sectors and lap times"""
     if df_table is None or df_table.empty:
@@ -1158,13 +1185,10 @@ def highlight_best_sectors_and_times(df_table, num_sectors=3):
     # Create a copy for styling
     styled_df = df_table.copy()
 
-    # Find best lap time (convert back to float for comparison)
+    # Find best lap time (convert mm:ss.xxx back to seconds for comparison)
     lap_times = []
     for time_str in df_table['Lap Time']:
-        if 'N/A' not in str(time_str):
-            lap_times.append(float(time_str.replace('s', '')))
-        else:
-            lap_times.append(float('inf'))
+        lap_times.append(parse_time_to_seconds(time_str))
 
     best_lap_time = min(lap_times) if lap_times else 0
     best_lap_idx = lap_times.index(best_lap_time) if lap_times else -1
@@ -1176,12 +1200,9 @@ def highlight_best_sectors_and_times(df_table, num_sectors=3):
         if sector_col in df_table.columns:
             sector_times = []
             for time_str in df_table[sector_col]:
-                if 'N/A' not in str(time_str):
-                    sector_times.append(float(time_str.replace('s', '')))
-                else:
-                    sector_times.append(float('inf'))
+                sector_times.append(parse_time_to_seconds(time_str))
 
-            if sector_times:
+            if sector_times and min(sector_times) < float('inf'):
                 best_sectors[sector_col] = min(sector_times)
 
     return styled_df, best_lap_idx, best_sectors
@@ -1452,6 +1473,22 @@ def main():
             # Quick filters
             st.sidebar.header("Quick Filters")
 
+            # Lap filter (NEW - add this FIRST)
+            if 'LAP_BEACON' in df.columns:
+                available_laps = sorted(df['LAP_BEACON'].dropna().unique())
+                if len(available_laps) > 1:
+                    lap_filter = st.sidebar.checkbox("Filter by Laps")
+                    if lap_filter:
+                        selected_laps_filter = st.sidebar.multiselect(
+                            "Select Laps to Analyze:",
+                            available_laps,
+                            default=available_laps,
+                            help="Choose specific laps for analysis"
+                        )
+                        if selected_laps_filter:
+                            df = df[df['LAP_BEACON'].isin(selected_laps_filter)]
+                            st.sidebar.success(f"Filtered to {len(selected_laps_filter)} lap(s)")
+
             # Time range filter
             if 'Time' in df.columns:
                 time_range = st.sidebar.slider(
@@ -1540,14 +1577,16 @@ def main():
 
                             with col2:
                                 if len(lap_table) > 1:
-                                    all_times = [float(t.replace('s', '')) for t in lap_table['Lap Time'] if 'N/A' not in str(t)]
+                                    all_times = [parse_time_to_seconds(t) for t in lap_table['Lap Time'] if
+                                                 parse_time_to_seconds(t) < float('inf')]
                                     if all_times:
                                         avg_time = sum(all_times) / len(all_times)
-                                        st.info(f"**Average Lap**: {avg_time:.3f}s")
+                                        st.info(f"**Average Lap**: {format_time_mmss(avg_time)}")
 
                             with col3:
                                 if len(lap_table) > 1:
-                                    all_times = [float(t.replace('s', '')) for t in lap_table['Lap Time'] if 'N/A' not in str(t)]
+                                    all_times = [parse_time_to_seconds(t) for t in lap_table['Lap Time'] if
+                                                 parse_time_to_seconds(t) < float('inf')]
                                     if all_times:
                                         consistency = np.std(all_times)
                                         st.info(f"**Consistency**: ±{consistency:.3f}s")
@@ -1577,7 +1616,7 @@ def main():
                                         # Highlight best sectors
                                         if col.startswith('Sector') and col in best_sectors:
                                             if 'N/A' not in str(value):
-                                                current_time = float(str(value).replace('s', ''))
+                                                current_time = parse_time_to_seconds(str(value))
                                                 if abs(current_time - best_sectors[col]) < 0.001:
                                                     cell_style += " background-color: #90EE90; font-weight: bold;"
 
@@ -1622,7 +1661,7 @@ def main():
                                     best_lap = None
                                     for _, row in lap_table.iterrows():
                                         if 'N/A' not in str(row[sector_col]):
-                                            if abs(float(row[sector_col].replace('s', '')) - best_time) < 0.001:
+                                            if abs(parse_time_to_seconds(row[sector_col]) - best_time) < 0.001:
                                                 best_lap = row['Lap']
                                                 break
 
