@@ -256,3 +256,6 @@ Built for the racing and automotive community using:
 pip install streamlit plotly pandas numpy
 streamlit run racing_dashboard.py
 ```
+
+
+https://community.lemansultimate.com/index.php?threads/%F0%9F%94%A7how-to-install-motec-logging-%F0%9F%93%8A.9045/
