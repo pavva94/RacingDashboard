@@ -580,7 +580,7 @@ Provide helpful, concise answers about racing performance, data interpretation, 
             return "Unsupported API type. Please use 'openai', 'gemini', or 'ollama'."
 
 
-def render_ai_chat_interface(df: pd.DataFrame, lap_data: dict = None):
+def render_ai_chat_interface(df: pd.DataFrame, lap_data: dict = None,   game_type: str = "Assetto Corsa Competizione"):
     """Render the AI chat interface as a dedicated section"""
 
     # Initialize session state for chat
@@ -729,7 +729,7 @@ def render_ai_chat_interface(df: pd.DataFrame, lap_data: dict = None):
             st.session_state.chat_messages.append({"role": "user", "content": user_input.strip()})
 
             # Generate data context
-            data_context = st.session_state.ai_assistant.get_data_context(df, lap_data, game_selection)
+            data_context = st.session_state.ai_assistant.get_data_context(df, lap_data, game_type)
 
             # Get AI response
             with st.spinner("AI is thinking..."):
@@ -753,7 +753,7 @@ def render_ai_chat_interface(df: pd.DataFrame, lap_data: dict = None):
                     st.session_state.chat_messages[-2]["role"] == "assistant"
             ):
                 # Generate data context
-                data_context = st.session_state.ai_assistant.get_data_context(df, lap_data)
+                data_context = st.session_state.ai_assistant.get_data_context(df, lap_data, game_type)
 
                 # Get AI response
                 with st.spinner("AI is analyzing your data..."):
@@ -1869,7 +1869,7 @@ def main():
             ai_tab = tab6 if has_lap_comparison else tab5
             with ai_tab:
                 st.header("AI Racing Assistant")
-                render_ai_chat_interface(df, lap_data)
+                render_ai_chat_interface(df, lap_data, game_selection)
 
             # Data tab (always last)
             data_tab = tab7 if has_lap_comparison else tab6
