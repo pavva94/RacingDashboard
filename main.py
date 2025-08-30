@@ -14,12 +14,14 @@ from typing import Optional
 warnings.filterwarnings('ignore')
 
 # Set page config
+# Set page config
 st.set_page_config(
     page_title="Racing Telemetry Dashboard",
     page_icon="🏎️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
 
 # Simplified CSS for better styling (removed problematic fixed positioning)
 st.markdown("""
@@ -94,8 +96,79 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# Column mappings for different games
+ACC_COLUMN_MAP = {
+    'Time': 'Time',
+    'SPEED': 'SPEED',
+    'THROTTLE': 'THROTTLE',
+    'BRAKE': 'BRAKE',
+    'STEERANGLE': 'STEERANGLE',
+    'RPMS': 'RPMS',
+    'GEAR': 'GEAR',
+    'G_LAT': 'G_LAT',
+    'G_LON': 'G_LON',
+    'LAP_BEACON': 'LAP_BEACON',
+    'CLUTCH': 'CLUTCH',
+    'BRAKE_TEMP_LF': 'BRAKE_TEMP_LF',
+    'BRAKE_TEMP_RF': 'BRAKE_TEMP_RF',
+    'BRAKE_TEMP_LR': 'BRAKE_TEMP_LR',
+    'BRAKE_TEMP_RR': 'BRAKE_TEMP_RR',
+    'TYRE_TAIR_LF': 'TYRE_TAIR_LF',
+    'TYRE_TAIR_RF': 'TYRE_TAIR_RF',
+    'TYRE_TAIR_LR': 'TYRE_TAIR_LR',
+    'TYRE_TAIR_RR': 'TYRE_TAIR_RR'
+}
+
+LMU_COLUMN_MAP = {
+    'Time': 'Time',
+    'SPEED': 'Ground Speed',
+    'THROTTLE': 'Throttle Pos',
+    'BRAKE': 'Brake Pos',
+    'STEERANGLE': 'Steering',
+    'RPMS': 'Engine RPM',
+    'GEAR': 'Gear',
+    'G_LAT': 'G Force Lat',
+    'G_LON': 'G Force Long',
+    'LAP_BEACON': 'Lap Number',
+    'CLUTCH': 'Clutch Pos',
+    'BRAKE_TEMP_LF': 'Brake Temp FL',
+    'BRAKE_TEMP_RF': 'Brake Temp FR',
+    'BRAKE_TEMP_LR': 'Brake Temp RL',
+    'BRAKE_TEMP_RR': 'Brake Temp RR',
+    'TYRE_TAIR_LF': 'Tyre Temp FL Centre',
+    'TYRE_TAIR_RF': 'Tyre Temp FR Centre',
+    'TYRE_TAIR_LR': 'Tyre Temp RL Centre',
+    'TYRE_TAIR_RR': 'Tyre Temp RR Centre',
+    'TYRE_PRESS_LF': 'Tyre Pressure FL',
+    'TYRE_PRESS_RF': 'Tyre Pressure FR',
+    'TYRE_PRESS_LR': 'Tyre Pressure RL',
+    'TYRE_PRESS_RR': 'Tyre Pressure RR',
+    'WHEEL_SPEED_LF': 'Wheel Rot Speed FL',
+    'WHEEL_SPEED_RF': 'Wheel Rot Speed FR',
+    'WHEEL_SPEED_LR': 'Wheel Rot Speed RL',
+    'WHEEL_SPEED_RR': 'Wheel Rot Speed RR',
+    'FUEL_LEVEL': 'Fuel Level',
+    'ENG_WATER_TEMP': 'Eng Water Temp',
+    'ENG_OIL_TEMP': 'Eng Oil Temp'
+}
+
+def normalize_column_names(df, game_type):
+    """Normalize column names based on game type"""
+    column_map = LMU_COLUMN_MAP if game_type == "Le Mans Ultimate" else ACC_COLUMN_MAP
+
+    # Create reverse mapping to rename columns to standard names
+    reverse_map = {}
+    for standard_name, game_name in column_map.items():
+        if game_name in df.columns:
+            reverse_map[game_name] = standard_name
+
+    # Rename columns
+    df = df.rename(columns=reverse_map)
+
+    return df
+
 @st.cache_data
-def load_and_sample_data(file, sample_size=50000):
+def load_and_sample_data(file, sample_size=50000, game_type="Assetto Corsa Competizione"):
     """Load and intelligently sample the CSV data for performance"""
     try:
         # First, read just a few rows to get column info
@@ -122,11 +195,22 @@ def load_and_sample_data(file, sample_size=50000):
         # Clean column names
         df.columns = df.columns.str.strip().str.replace('"', '')
 
+        # Normalize column names based on game type
+        df = normalize_column_names(df, game_type)
+
         # Efficient type conversion - only convert columns we'll actually use
         key_numeric_columns = [
             'Time', 'G_LAT', 'ROTY', 'STEERANGLE', 'SPEED', 'THROTTLE',
             'BRAKE', 'GEAR', 'G_LON', 'CLUTCH', 'RPMS'
         ]
+
+        # Add LMU-specific columns for conversion
+        if game_type == "Le Mans Ultimate":
+            key_numeric_columns.extend([
+                'FUEL_LEVEL', 'ENG_WATER_TEMP', 'ENG_OIL_TEMP',
+                'TYRE_PRESS_LF', 'TYRE_PRESS_RF', 'TYRE_PRESS_LR', 'TYRE_PRESS_RR',
+                'WHEEL_SPEED_LF', 'WHEEL_SPEED_RF', 'WHEEL_SPEED_LR', 'WHEEL_SPEED_RR'
+            ])
 
         for col in key_numeric_columns:
             if col in df.columns:
@@ -169,39 +253,197 @@ class AIAssistant:
         self.base_url = base_url
         self.model = model
 
-    def get_data_context(self, df: pd.DataFrame, lap_data: dict = None) -> str:
-        """Generate context about the current data"""
+    def get_data_context(self, df: pd.DataFrame, lap_data: dict = None, game_type: str = "Assetto Corsa Competizione") -> str:
+        """Generate comprehensive context about the current racing data"""
+        import numpy as np
+
         context = f"""
-Current Racing Data Analysis:
+    Current Racing Data Analysis ({game_type}):
 
-Dataset Overview:
-- Total rows: {len(df):,}
-- Time range: {df['Time'].min():.1f}s to {df['Time'].max():.1f}s ({df['Time'].max() - df['Time'].min():.1f}s duration)
-- Available columns: {', '.join(df.columns.tolist())}
+    Dataset Overview:
+    - Total rows: {len(df):,}
+    - Time range: {df['Time'].min():.1f}s to {df['Time'].max():.1f}s ({df['Time'].max() - df['Time'].min():.1f}s duration)
+    - Data frequency: {1 / (df['Time'].iloc[1] - df['Time'].iloc[0]):.0f} Hz
+    - Available columns: {len(df.columns)} parameters
 
-Performance Metrics:
-"""
+    Performance Metrics:"""
 
+        # Speed Analysis
         if 'SPEED' in df.columns:
-            context += f"- Speed: Max {df['SPEED'].max():.1f} km/h, Avg {df['SPEED'].mean():.1f} km/h\n"
+            speed_data = df['SPEED']
+            context += f"""
+    - Speed: Max {speed_data.max():.1f} km/h, Avg {speed_data.mean():.1f} km/h, Min {speed_data.min():.1f} km/h
+    - Speed variance: {speed_data.std():.1f} km/h (consistency indicator)"""
+
+            # Speed zones analysis
+            high_speed = (speed_data > speed_data.quantile(0.8)).sum()
+            low_speed = (speed_data < speed_data.quantile(0.2)).sum()
+            context += f"""
+    - High speed zones (>80th percentile): {high_speed / len(df) * 100:.1f}% of time
+    - Low speed zones (<20th percentile): {low_speed / len(df) * 100:.1f}% of time"""
+
+        # Engine Analysis
         if 'RPMS' in df.columns:
-            context += f"- RPM: Max {df['RPMS'].max():.0f}, Avg {df['RPMS'].mean():.0f}\n"
+            rpm_data = df['RPMS']
+            context += f"""
+    - RPM: Max {rpm_data.max():.0f}, Avg {rpm_data.mean():.0f}, Min {rpm_data.min():.0f}
+    - Engine load distribution: {(rpm_data > rpm_data.mean()).sum() / len(df) * 100:.1f}% above average RPM"""
+
+        # Throttle and Brake Analysis
         if 'THROTTLE' in df.columns:
-            context += f"- Throttle: Avg {df['THROTTLE'].mean():.1f}%, Max {df['THROTTLE'].max():.1f}%\n"
+            throttle_data = df['THROTTLE']
+            full_throttle_time = (throttle_data > 95).sum() / len(df) * 100
+            partial_throttle_time = ((throttle_data > 10) & (throttle_data <= 95)).sum() / len(df) * 100
+            context += f"""
+    - Throttle: Avg {throttle_data.mean():.1f}%, Max {throttle_data.max():.1f}%
+    - Full throttle time: {full_throttle_time:.1f}% of session
+    - Partial throttle time: {partial_throttle_time:.1f}% of session"""
+
         if 'BRAKE' in df.columns:
-            context += f"- Brake: Avg {df['BRAKE'].mean():.1f}%, Max {df['BRAKE'].max():.1f}%\n"
+            brake_data = df['BRAKE']
+            braking_time = (brake_data > 5).sum() / len(df) * 100
+            hard_braking_time = (brake_data > 80).sum() / len(df) * 100
+            context += f"""
+    - Brake: Avg {brake_data.mean():.1f}%, Max {brake_data.max():.1f}%
+    - Braking time: {braking_time:.1f}% of session
+    - Hard braking events: {hard_braking_time:.1f}% of session"""
+
+        # G-Force Analysis
         if 'G_LAT' in df.columns and 'G_LON' in df.columns:
-            max_lat = df['G_LAT'].abs().max()
-            max_lon = df['G_LON'].abs().max()
-            context += f"- G-Forces: Max Lateral {max_lat:.2f}g, Max Longitudinal {max_lon:.2f}g\n"
+            lat_g = df['G_LAT']
+            lon_g = df['G_LON']
+            max_lat = lat_g.abs().max()
+            max_lon = lon_g.abs().max()
+            max_combined_g = np.sqrt(lat_g ** 2 + lon_g ** 2).max()
 
+            context += f"""
+    - G-Forces: Max Lateral {max_lat:.2f}g, Max Longitudinal {max_lon:.2f}g
+    - Max Combined G-Force: {max_combined_g:.2f}g
+    - Cornering intensity: {(lat_g.abs() > 0.5).sum() / len(df) * 100:.1f}% above 0.5g lateral"""
+
+        # Steering Analysis
+        if 'STEERANGLE' in df.columns:
+            steer_data = df['STEERANGLE']
+            max_steer = steer_data.abs().max()
+            avg_steer_input = steer_data.abs().mean()
+            context += f"""
+    - Steering: Max angle {max_steer:.1f}°, Avg input {avg_steer_input:.1f}°
+    - Sharp turns: {(steer_data.abs() > steer_data.abs().quantile(0.9)).sum()} instances"""
+
+        # Gear Analysis
+        if 'GEAR' in df.columns:
+            gear_data = df['GEAR']
+            gear_distribution = gear_data.value_counts().sort_index()
+            max_gear = gear_data.max()
+            context += f"""
+    - Gears: Max gear {max_gear}, Most used: Gear {gear_distribution.idxmax()} ({gear_distribution.max() / len(df) * 100:.1f}% of time)
+    - Gear distribution: {dict(gear_distribution.head(5))}"""
+
+        # Suspension Travel Analysis
+        suspension_cols = [col for col in df.columns if 'SUS_TRAVEL' in col]
+        if suspension_cols:
+            context += f"\nSuspension Analysis:"
+            for col in suspension_cols:
+                sus_data = df[col]
+                context += f"""
+    - {col}: Range {sus_data.min():.1f} to {sus_data.max():.1f}mm, Avg {sus_data.mean():.1f}mm"""
+
+        # Brake Temperature Analysis
+        brake_temp_cols = [col for col in df.columns if 'BRAKE_TEMP' in col]
+        if brake_temp_cols:
+            context += f"\nBrake Temperature Analysis:"
+            for col in brake_temp_cols:
+                temp_data = df[col]
+                context += f"""
+    - {col}: Max {temp_data.max():.0f}°C, Avg {temp_data.mean():.0f}°C"""
+
+        # Tire Analysis
+        tire_pressure_cols = [col for col in df.columns if 'TYRE_PRESS' in col]
+        tire_temp_cols = [col for col in df.columns if 'TYRE_TAIR' in col]
+        wheel_speed_cols = [col for col in df.columns if 'WHEEL_SPEED' in col]
+
+        if tire_pressure_cols or tire_temp_cols or wheel_speed_cols:
+            context += f"\nTire Analysis:"
+
+            if tire_pressure_cols:
+                pressures = [df[col].mean() for col in tire_pressure_cols]
+                context += f"""
+    - Avg tire pressures: LF:{df[tire_pressure_cols[0]].mean():.1f}, RF:{df[tire_pressure_cols[1]].mean():.1f}, LR:{df[tire_pressure_cols[2]].mean():.1f}, RR:{df[tire_pressure_cols[3]].mean():.1f}"""
+
+            if tire_temp_cols:
+                temps = [df[col].mean() for col in tire_temp_cols]
+                context += f"""
+    - Avg tire temps: LF:{df[tire_temp_cols[0]].mean():.0f}°C, RF:{df[tire_temp_cols[1]].mean():.0f}°C, LR:{df[tire_temp_cols[2]].mean():.0f}°C, RR:{df[tire_temp_cols[3]].mean():.0f}°C"""
+
+            if wheel_speed_cols:
+                # Detect potential wheel spin/lock
+                wheel_speeds = [df[col] for col in wheel_speed_cols]
+                if len(wheel_speeds) >= 4:
+                    front_avg = (wheel_speeds[0] + wheel_speeds[1]) / 2
+                    rear_avg = (wheel_speeds[2] + wheel_speeds[3]) / 2
+                    speed_diff = (front_avg - rear_avg).abs().mean()
+                    context += f"""
+    - Front/Rear speed difference: {speed_diff:.2f} m/s avg (wheel slip indicator)"""
+
+        # Traction Control and ABS Analysis
+        if 'TC' in df.columns:
+            tc_active = (df['TC'] > 0).sum()
+            if tc_active > 0:
+                context += f"""
+    - Traction Control: Active for {tc_active} samples ({tc_active / len(df) * 100:.1f}% of time)"""
+
+        if 'ABS' in df.columns:
+            abs_active = (df['ABS'] > 0).sum()
+            if abs_active > 0:
+                context += f"""
+    - ABS: Active for {abs_active} samples ({abs_active / len(df) * 100:.1f}% of time)"""
+
+        # Performance Consistency Analysis
+        if 'SPEED' in df.columns and 'THROTTLE' in df.columns:
+            # Calculate throttle-speed correlation for driving smoothness
+            throttle_speed_corr = df['THROTTLE'].corr(df['SPEED'])
+            context += f"""
+    - Driving smoothness (throttle-speed correlation): {throttle_speed_corr:.3f}"""
+
+        # Lap Data Analysis
         if lap_data:
-            context += f"\nLap Data Available:\n"
-            context += f"- Number of laps: {len(lap_data)}\n"
-            lap_times = [lap_data[lap]['duration'] for lap in lap_data.keys()]
-            context += f"- Lap times range: {min(lap_times):.2f}s to {max(lap_times):.2f}s\n"
+            context += f"\nLap Performance Analysis:"
+            context += f"- Number of laps: {len(lap_data)}"
 
-        context += "\nI can help analyze this racing telemetry data, compare laps, identify performance opportunities, and answer questions about driving technique, setup, and optimization."
+            lap_times = [lap_data[lap]['duration'] for lap in lap_data.keys()]
+            if len(lap_times) > 1:
+                fastest_lap = min(lap_times)
+                slowest_lap = max(lap_times)
+                avg_lap = sum(lap_times) / len(lap_times)
+                lap_consistency = np.std(lap_times)
+
+                context += f"""
+    - Lap times: Fastest {fastest_lap:.2f}s, Slowest {slowest_lap:.2f}s, Average {avg_lap:.2f}s
+    - Lap consistency (std dev): {lap_consistency:.2f}s
+    - Improvement potential: {slowest_lap - fastest_lap:.2f}s between best and worst lap"""
+
+        # Data Quality Assessment
+        missing_data_cols = df.columns[df.isnull().any()].tolist()
+        if missing_data_cols:
+            context += f"""
+    Data Quality Notes:
+    - Columns with missing data: {', '.join(missing_data_cols[:5])}{'...' if len(missing_data_cols) > 5 else ''}"""
+
+        context += f"""
+
+    Advanced Analysis Capabilities Available:
+    - Sector-by-sector performance comparison
+    - Cornering speed analysis and racing line optimization  
+    - Brake point optimization and trail-braking analysis
+    - Throttle application timing and traction management
+    - Suspension setup analysis for handling balance
+    - Tire degradation and pressure optimization
+    - Engine mapping efficiency analysis
+    - Aerodynamic balance assessment through speed/g-force correlation
+    - Driver consistency metrics and improvement areas
+    - Setup recommendations based on track characteristics
+
+    I can provide detailed insights into driving technique, car setup optimization, performance gaps, and specific recommendations for lap time improvement."""
 
         return context
 
@@ -487,7 +729,7 @@ def render_ai_chat_interface(df: pd.DataFrame, lap_data: dict = None):
             st.session_state.chat_messages.append({"role": "user", "content": user_input.strip()})
 
             # Generate data context
-            data_context = st.session_state.ai_assistant.get_data_context(df, lap_data)
+            data_context = st.session_state.ai_assistant.get_data_context(df, lap_data, game_selection)
 
             # Get AI response
             with st.spinner("AI is thinking..."):
@@ -1006,7 +1248,16 @@ def create_sector_analysis(lap_data, selected_laps, num_sectors=3):
 
 # Main Dashboard
 def main():
-    st.markdown('<h1 class="main-header">Racing Telemetry Dashboard (Optimized)</h1>', unsafe_allow_html=True)
+    # Game selection at the top (moved from earlier)
+    col1, col2, col3 = st.columns([2, 1, 2])
+    with col2:
+        game_selection = st.radio(
+            "Select Racing Game:",
+            ["Assetto Corsa Competizione", "Le Mans Ultimate"],
+            index=0,
+            key="game_select",
+            help="Choose your racing simulation for proper data format handling"
+        )
 
     # Sidebar
     st.sidebar.header("Data Upload")
@@ -1031,10 +1282,11 @@ def main():
     if uploaded_file is not None:
         # Load data with sampling
         with st.spinner("Loading and sampling data..."):
-            df, total_rows = load_and_sample_data(uploaded_file, max_sample_size)
+            df, total_rows = load_and_sample_data(uploaded_file, max_sample_size, game_selection)
 
         if df is not None:
             st.sidebar.success(f"Data loaded: {len(df):,} of {total_rows:,} rows")
+            st.sidebar.info(f"Game: {game_selection}")
 
             # Data summary
             st.sidebar.header("Data Summary")
