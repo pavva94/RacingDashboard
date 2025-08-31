@@ -1423,6 +1423,158 @@ def create_sector_analysis(lap_data, selected_laps, num_sectors=3):
     return fig, sector_df
 
 
+def calculate_fuel_consumption(df, lap_data=None):
+    """Calculate fuel consumption rates and strategies"""
+    if 'FUEL_LEVEL' not in df.columns:
+        return None
+
+    fuel_data = df['FUEL_LEVEL'].dropna()
+    if len(fuel_data) < 10:
+        return None
+
+    # Calculate fuel usage rate
+    time_data = df[df['FUEL_LEVEL'].notna()]['Time']
+    session_duration = time_data.max() - time_data.min()
+    fuel_used = fuel_data.iloc[0] - fuel_data.iloc[-1]
+
+    consumption_rate = fuel_used / (session_duration / 60)  # L/min
+
+    # Per lap consumption if lap data available
+    per_lap_consumption = None
+    if lap_data and len(lap_data) >= 2:
+        lap_consumptions = []
+        for lap_num, lap_info in lap_data.items():
+            lap_df = lap_info['data']
+            if 'FUEL_LEVEL' in lap_df.columns:
+                lap_fuel_data = lap_df['FUEL_LEVEL'].dropna()
+                if len(lap_fuel_data) >= 2:
+                    lap_fuel_used = lap_fuel_data.iloc[0] - lap_fuel_data.iloc[-1]
+                    if lap_fuel_used > 0:
+                        lap_consumptions.append(lap_fuel_used)
+
+        if lap_consumptions:
+            per_lap_consumption = np.mean(lap_consumptions)
+
+    return {
+        'total_fuel_used': fuel_used,
+        'session_duration_min': session_duration / 60,
+        'consumption_rate_per_min': consumption_rate,
+        'per_lap_consumption': per_lap_consumption,
+        'remaining_fuel': fuel_data.iloc[-1],
+        'starting_fuel': fuel_data.iloc[0]
+    }
+
+
+def calculate_pit_strategy(fuel_stats, race_duration_min, lap_time_avg, tank_capacity=120):
+    """Calculate optimal pit strategy"""
+    if not fuel_stats or fuel_stats['consumption_rate_per_min'] <= 0:
+        return None
+
+    consumption_rate = fuel_stats['consumption_rate_per_min']
+
+    # Calculate fuel needed for race
+    fuel_needed = consumption_rate * race_duration_min
+
+    # Determine pit stops needed
+    usable_fuel = tank_capacity * 0.95  # Leave 5% buffer
+
+    if fuel_needed <= usable_fuel:
+        pit_stops = 0
+        fuel_to_load = fuel_needed
+    else:
+        pit_stops = int(np.ceil(fuel_needed / usable_fuel)) - 1
+        fuel_to_load = usable_fuel
+
+    # Calculate stint lengths
+    if pit_stops == 0:
+        stint_duration = race_duration_min
+        stint_laps = race_duration_min / (lap_time_avg / 60) if lap_time_avg > 0 else 0
+    else:
+        stint_duration = usable_fuel / consumption_rate
+        stint_laps = stint_duration / (lap_time_avg / 60) if lap_time_avg > 0 else 0
+
+    # Calculate pit windows
+    pit_windows = []
+    if pit_stops > 0:
+        for pit in range(pit_stops):
+            window_start = (pit + 1) * stint_duration - 2  # 2 min window
+            window_end = (pit + 1) * stint_duration + 2
+            pit_windows.append({
+                'pit_number': pit + 1,
+                'window_start_min': max(0, window_start),
+                'window_end_min': min(race_duration_min, window_end),
+                'target_time_min': (pit + 1) * stint_duration
+            })
+
+    return {
+        'fuel_to_load': fuel_to_load,
+        'pit_stops_needed': pit_stops,
+        'stint_duration_min': stint_duration,
+        'stint_laps': stint_laps,
+        'total_fuel_needed': fuel_needed,
+        'pit_windows': pit_windows,
+        'fuel_margin': usable_fuel - (fuel_needed / (pit_stops + 1)) if pit_stops > 0 else usable_fuel - fuel_needed
+    }
+
+
+def create_fuel_analysis_charts(df, fuel_stats):
+    """Create fuel consumption analysis charts"""
+    if 'FUEL_LEVEL' not in df.columns or not fuel_stats:
+        return None
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=('Fuel Level Over Time', 'Fuel vs Speed',
+                        'Consumption Rate', 'Fuel vs Throttle'),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}]]
+    )
+
+    plot_df = sample_for_plotting(df, 2000)
+
+    # Fuel level over time
+    fig.add_trace(
+        go.Scattergl(x=plot_df['Time'], y=plot_df['FUEL_LEVEL'],
+                     name='Fuel Level', mode='lines',
+                     line=dict(color='green', width=2)),
+        row=1, col=1
+    )
+
+    # Fuel vs Speed
+    if 'SPEED' in plot_df.columns:
+        fig.add_trace(
+            go.Scattergl(x=plot_df['SPEED'], y=plot_df['FUEL_LEVEL'],
+                         mode='markers', name='Fuel vs Speed',
+                         marker=dict(size=2, opacity=0.6, color='blue')),
+            row=1, col=2
+        )
+
+    # Consumption rate (calculated)
+    if len(plot_df) > 1:
+        fuel_diff = plot_df['FUEL_LEVEL'].diff()
+        time_diff = plot_df['Time'].diff()
+        consumption_rate = -fuel_diff / (time_diff / 60)  # L/min
+
+        fig.add_trace(
+            go.Scattergl(x=plot_df['Time'][1:], y=consumption_rate[1:],
+                         name='Consumption Rate', mode='lines',
+                         line=dict(color='red', width=1)),
+            row=2, col=1
+        )
+
+    # Fuel vs Throttle
+    if 'THROTTLE' in plot_df.columns:
+        fig.add_trace(
+            go.Scattergl(x=plot_df['THROTTLE'], y=plot_df['FUEL_LEVEL'],
+                         mode='markers', name='Fuel vs Throttle',
+                         marker=dict(size=2, opacity=0.6, color='orange')),
+            row=2, col=2
+        )
+
+    fig.update_layout(height=600, showlegend=True, title_text="Fuel Analysis")
+    return fig
+
+
 # Main Dashboard
 def main():
     # Game selection at the top (moved from earlier)
@@ -1516,13 +1668,13 @@ def main():
 
             # Main content tabs
             if lap_data and len(lap_data) >= 2:
-                tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-                    "Performance", "Tires", "Brakes", "G-Forces", "Lap Comparison", "AI Assistant", "Data"
+                tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+                    "Performance", "Tires", "Brakes", "G-Forces", "Lap Comparison", "Utils", "AI Assistant", "Data"
                 ])
                 has_lap_comparison = True
             else:
-                tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-                    "Performance", "Tires", "Brakes", "G-Forces", "AI Assistant", "Data"
+                tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+                    "Performance", "Tires", "Brakes", "G-Forces", "Utils", "AI Assistant", "Data"
                 ])
                 has_lap_comparison = False
 
@@ -1870,14 +2022,272 @@ def main():
                         st.warning("Lap comparison requires at least 2 complete laps with LAP_BEACON data.")
                         st.info("Make sure your CSV file contains a 'LAP_BEACON' column with lap numbers.")
 
+            # Utils Tab
+            utils_tab = tab6 if has_lap_comparison else tab5
+            with utils_tab:
+                st.header("Race Strategy Utils")
+
+                # Check if fuel data is available
+                has_fuel_data = 'FUEL_LEVEL' in df.columns
+
+                if has_fuel_data:
+                    # Calculate fuel statistics
+                    with st.spinner("Analyzing fuel consumption..."):
+                        fuel_stats = calculate_fuel_consumption(df, lap_data)
+
+                    if fuel_stats:
+                        st.subheader("Fuel Consumption Analysis")
+
+                        # Display current fuel stats
+                        col1, col2, col3, col4 = st.columns(4)
+
+                        with col1:
+                            st.metric("Fuel Used", f"{fuel_stats['total_fuel_used']:.1f}L")
+                        with col2:
+                            st.metric("Consumption Rate", f"{fuel_stats['consumption_rate_per_min']:.2f} L/min")
+                        with col3:
+                            if fuel_stats['per_lap_consumption']:
+                                st.metric("Per Lap", f"{fuel_stats['per_lap_consumption']:.2f}L")
+                            else:
+                                st.metric("Per Lap", "N/A")
+                        with col4:
+                            st.metric("Remaining", f"{fuel_stats['remaining_fuel']:.1f}L")
+
+                        # Fuel consumption charts
+                        st.subheader("Fuel Analysis Charts")
+                        fuel_chart = create_fuel_analysis_charts(df, fuel_stats)
+                        if fuel_chart:
+                            st.plotly_chart(fuel_chart, use_container_width=True)
+
+                        # Pit Strategy Calculator
+                        st.subheader("Pit Strategy Calculator")
+
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            race_duration = st.number_input(
+                                "Race Duration (minutes):",
+                                min_value=5,
+                                max_value=1440,  # 24 hours
+                                value=60,
+                                step=5,
+                                help="Enter the total race duration"
+                            )
+
+                            tank_capacity = st.number_input(
+                                "Tank Capacity (L):",
+                                min_value=50,
+                                max_value=200,
+                                value=120,
+                                step=5,
+                                help="Maximum fuel tank capacity"
+                            )
+
+                        with col2:
+                            # Calculate average lap time from lap data
+                            avg_lap_time = 90  # default
+                            if lap_data:
+                                lap_times = [lap_info['duration'] for lap_info in lap_data.values()]
+                                if lap_times:
+                                    avg_lap_time = sum(lap_times) / len(lap_times)
+
+                            manual_lap_time = st.number_input(
+                                "Average Lap Time (seconds):",
+                                min_value=30.0,
+                                max_value=600.0,
+                                value=float(avg_lap_time),
+                                step=0.1,
+                                help="Your average lap time"
+                            )
+
+                            if st.button("Calculate Pit Strategy", type="primary"):
+                                pit_strategy = calculate_pit_strategy(
+                                    fuel_stats, race_duration, manual_lap_time, tank_capacity
+                                )
+
+                                if pit_strategy:
+                                    st.success("Pit Strategy Calculated!")
+
+                                    # Strategy overview
+                                    st.subheader("Strategy Overview")
+
+                                    col1, col2, col3 = st.columns(3)
+                                    with col1:
+                                        st.metric("Fuel to Load", f"{pit_strategy['fuel_to_load']:.1f}L")
+                                    with col2:
+                                        st.metric("Pit Stops Needed", pit_strategy['pit_stops_needed'])
+                                    with col3:
+                                        st.metric("Stint Duration", f"{pit_strategy['stint_duration_min']:.1f} min")
+
+                                    # Detailed strategy
+                                    st.subheader("Detailed Strategy")
+
+                                    strategy_data = []
+
+                                    # Starting stint
+                                    strategy_data.append({
+                                        'Stint': 'Start → Pit 1' if pit_strategy[
+                                                                        'pit_stops_needed'] > 0 else 'Full Race',
+                                        'Duration (min)': f"{pit_strategy['stint_duration_min']:.1f}",
+                                        'Estimated Laps': f"{pit_strategy['stint_laps']:.0f}",
+                                        'Action': f"Load {pit_strategy['fuel_to_load']:.1f}L" if pit_strategy[
+                                                                                                     'pit_stops_needed'] > 0 else "Full fuel load"
+                                    })
+
+                                    # Pit windows
+                                    for i, window in enumerate(pit_strategy['pit_windows']):
+                                        strategy_data.append({
+                                            'Stint': f"Pit {window['pit_number']} → {'Finish' if i == len(pit_strategy['pit_windows'])-1 else 'Pit ' + str(window['pit_number']+1)}",
+                                            'Duration (min)': f"{pit_strategy['stint_duration_min']:.1f}",
+                                            'Estimated Laps': f"{pit_strategy['stint_laps']:.0f}",
+                                            'Action': f"Pit window: {window['window_start_min']:.0f}-{window['window_end_min']:.0f} min"
+                                        })
+
+                                    strategy_df = pd.DataFrame(strategy_data)
+                                    st.dataframe(strategy_df, use_container_width=True, hide_index=True)
+
+                                    # Fuel margin analysis
+                                    st.subheader("Safety Analysis")
+                                    col1, col2 = st.columns(2)
+
+                                    with col1:
+                                        st.metric("Total Fuel Needed", f"{pit_strategy['total_fuel_needed']:.1f}L")
+                                        st.metric("Fuel Margin", f"{pit_strategy['fuel_margin']:.1f}L")
+
+                                    with col2:
+                                        margin_percent = (pit_strategy['fuel_margin'] / pit_strategy[
+                                            'total_fuel_needed']) * 100
+                                        if margin_percent > 10:
+                                            st.success(f"Safety margin: {margin_percent:.1f}% - Good")
+                                        elif margin_percent > 5:
+                                            st.warning(f"Safety margin: {margin_percent:.1f}% - Moderate")
+                                        else:
+                                            st.error(f"Safety margin: {margin_percent:.1f}% - Tight!")
+                                else:
+                                    st.error("Could not calculate pit strategy with current data")
+                    else:
+                        st.warning("Insufficient fuel data for consumption analysis")
+
+                else:
+                    st.info("Fuel level data not available in this dataset")
+                    st.markdown("""
+                    **Alternative Strategy Tools:**
+
+                    Use the manual calculator below for basic fuel planning when telemetry data doesn't include fuel levels.
+                    """)
+
+                # Manual fuel calculator (always available)
+                st.subheader("Manual Fuel Calculator")
+                st.markdown("*Use this when fuel data is not available in telemetry*")
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    manual_consumption = st.number_input(
+                        "Fuel per lap (L):",
+                        min_value=0.5,
+                        max_value=10.0,
+                        value=2.5,
+                        step=0.1,
+                        help="Estimated fuel consumption per lap"
+                    )
+
+                    manual_race_laps = st.number_input(
+                        "Race laps:",
+                        min_value=1,
+                        max_value=500,
+                        value=30,
+                        step=1,
+                        help="Total number of laps in the race"
+                    )
+
+                with col2:
+                    manual_tank = st.number_input(
+                        "Tank capacity (L):",
+                        min_value=50,
+                        max_value=200,
+                        value=120,
+                        step=5
+                    )
+
+                    safety_margin = st.slider(
+                        "Safety margin (%):",
+                        min_value=0,
+                        max_value=20,
+                        value=5,
+                        step=1,
+                        help="Extra fuel percentage for safety"
+                    )
+
+                with col3:
+                    if st.button("Calculate Manual Strategy", key="manual_calc"):
+                        total_fuel_needed = manual_consumption * manual_race_laps
+                        fuel_with_margin = total_fuel_needed * (1 + safety_margin / 100)
+                        usable_fuel = manual_tank * 0.95
+
+                        if fuel_with_margin <= usable_fuel:
+                            manual_pit_stops = 0
+                            fuel_to_load = fuel_with_margin
+                            stint_laps = manual_race_laps
+                        else:
+                            manual_pit_stops = int(np.ceil(fuel_with_margin / usable_fuel)) - 1
+                            fuel_to_load = usable_fuel
+                            stint_laps = usable_fuel / manual_consumption
+
+                        st.success("Manual Strategy Calculated!")
+
+                        # Display results
+                        st.markdown("### Manual Strategy Results")
+
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Fuel to Load", f"{fuel_to_load:.1f}L")
+                        with col2:
+                            st.metric("Pit Stops", manual_pit_stops)
+                        with col3:
+                            st.metric("Laps per Stint", f"{stint_laps:.0f}")
+
+                        # Create simple strategy table
+                        manual_strategy = []
+                        if manual_pit_stops == 0:
+                            manual_strategy.append({
+                                'Stint': 'Full Race',
+                                'Laps': manual_race_laps,
+                                'Fuel Needed': f"{total_fuel_needed:.1f}L",
+                                'Action': f"Load {fuel_to_load:.1f}L"
+                            })
+                        else:
+                            for stint in range(manual_pit_stops + 1):
+                                if stint == 0:
+                                    stint_name = "Start → Pit 1"
+                                    laps = int(stint_laps)
+                                elif stint == manual_pit_stops:
+                                    stint_name = f"Pit {stint} → Finish"
+                                    remaining_laps = manual_race_laps - (stint * int(stint_laps))
+                                    laps = remaining_laps
+                                else:
+                                    stint_name = f"Pit {stint} → Pit {stint + 1}"
+                                    laps = int(stint_laps)
+
+                                manual_strategy.append({
+                                    'Stint': stint_name,
+                                    'Laps': laps,
+                                    'Fuel Needed': f"{laps * manual_consumption:.1f}L",
+                                    'Action': f"{'Load' if stint == 0 else 'Refuel'} {fuel_to_load:.1f}L"
+                                })
+
+                        manual_strategy_df = pd.DataFrame(manual_strategy)
+                        st.dataframe(manual_strategy_df, use_container_width=True, hide_index=True)
+
+
             # AI Assistant Tab
-            ai_tab = tab6 if has_lap_comparison else tab5
+            ai_tab = tab7 if has_lap_comparison else tab6
             with ai_tab:
                 st.header("AI Racing Assistant")
                 render_ai_chat_interface(df, lap_data, game_selection)
 
             # Data tab (always last)
-            data_tab = tab7 if has_lap_comparison else tab6
+            data_tab = tab8 if has_lap_comparison else tab7
             with data_tab:
                 st.header("Data Explorer")
 
