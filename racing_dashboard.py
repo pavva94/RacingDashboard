@@ -275,12 +275,23 @@ class AIAssistant:
     - Speed: Max {speed_data.max():.1f} km/h, Avg {speed_data.mean():.1f} km/h, Min {speed_data.min():.1f} km/h
     - Speed variance: {speed_data.std():.1f} km/h (consistency indicator)"""
 
-            # Speed zones analysis
+            # Speed zones analysis with cornering identification
             high_speed = (speed_data > speed_data.quantile(0.8)).sum()
             low_speed = (speed_data < speed_data.quantile(0.2)).sum()
-            context += f"""
-    - High speed zones (>80th percentile): {high_speed / len(df) * 100:.1f}% of time
-    - Low speed zones (<20th percentile): {low_speed / len(df) * 100:.1f}% of time"""
+            mid_speed = len(df) - high_speed - low_speed
+
+            # Identify cornering zones (low speed + high lateral G)
+            if 'G_LAT' in df.columns:
+                cornering_zones = ((speed_data < speed_data.quantile(0.4)) & (df['G_LAT'].abs() > 0.3)).sum()
+                context += f"""
+            - High speed zones (>80th percentile): {high_speed / len(df) * 100:.1f}% - Straights/Fast corners
+            - Mid speed zones (20-80th percentile): {mid_speed / len(df) * 100:.1f}% - Medium corners/Acceleration zones  
+            - Low speed zones (<20th percentile): {low_speed / len(df) * 100:.1f}% - Slow corners/Braking zones
+            - Active cornering zones (low speed + >0.3g lateral): {cornering_zones / len(df) * 100:.1f}% - Technical sections"""
+            else:
+                context += f"""
+            - High speed zones (>80th percentile): {high_speed / len(df) * 100:.1f}% of time
+            - Low speed zones (<20th percentile): {low_speed / len(df) * 100:.1f}% of time"""
 
         # Engine Analysis
         if 'RPMS' in df.columns:
@@ -294,19 +305,61 @@ class AIAssistant:
             throttle_data = df['THROTTLE']
             full_throttle_time = (throttle_data > 95).sum() / len(df) * 100
             partial_throttle_time = ((throttle_data > 10) & (throttle_data <= 95)).sum() / len(df) * 100
-            context += f"""
-    - Throttle: Avg {throttle_data.mean():.1f}%, Max {throttle_data.max():.1f}%
-    - Full throttle time: {full_throttle_time:.1f}% of session
-    - Partial throttle time: {partial_throttle_time:.1f}% of session"""
+            coast_time = (throttle_data <= 10).sum() / len(df) * 100
+
+            # Calculate throttle application smoothness
+            throttle_changes = throttle_data.diff().abs()
+            aggressive_throttle_changes = (throttle_changes > 20).sum()
+            throttle_smoothness = 100 - (aggressive_throttle_changes / len(df) * 100)
+
+            # Analyze throttle-brake overlap (potential issue)
+            if 'BRAKE' in df.columns:
+                overlap_instances = ((throttle_data > 10) & (df['BRAKE'] > 10)).sum()
+                overlap_percentage = overlap_instances / len(df) * 100
+
+                context += f"""
+        - Throttle: Avg {throttle_data.mean():.1f}%, Max {throttle_data.max():.1f}%
+        - Full throttle time: {full_throttle_time:.1f}% - Maximum attack phases
+        - Partial throttle time: {partial_throttle_time:.1f}% - Modulation zones
+        - Coast time: {coast_time:.1f}% - Lift-off periods
+        - Throttle smoothness: {throttle_smoothness:.1f}% (higher = smoother application)
+        - Throttle-brake overlap: {overlap_percentage:.2f}% - {'ISSUE: Reduce overlap for better technique' if overlap_percentage > 1 else 'Good pedal separation'}"""
+            else:
+                context += f"""
+        - Throttle: Avg {throttle_data.mean():.1f}%, Max {throttle_data.max():.1f}%
+        - Full throttle time: {full_throttle_time:.1f}% - Maximum attack phases
+        - Partial throttle time: {partial_throttle_time:.1f}% - Modulation zones
+        - Coast time: {coast_time:.1f}% - Lift-off periods
+        - Throttle smoothness: {throttle_smoothness:.1f}% (higher = smoother application)"""
 
         if 'BRAKE' in df.columns:
             brake_data = df['BRAKE']
             braking_time = (brake_data > 5).sum() / len(df) * 100
             hard_braking_time = (brake_data > 80).sum() / len(df) * 100
+            trail_braking_time = ((brake_data > 5) & (brake_data < 50)).sum() / len(df) * 100
+
+            # Analyze brake release smoothness
+            brake_releases = brake_data.diff()
+            abrupt_releases = (brake_releases < -30).sum()  # Sudden brake releases
+
+            # Find braking zones and analyze consistency
+            braking_zones = brake_data > 20
+            zone_changes = braking_zones.diff()
+            braking_events = (zone_changes == True).sum()
+
+            if braking_events > 0:
+                avg_brake_event_duration = braking_time / braking_events * (len(df) / 100)
+            else:
+                avg_brake_event_duration = 0
+
             context += f"""
-    - Brake: Avg {brake_data.mean():.1f}%, Max {brake_data.max():.1f}%
-    - Braking time: {braking_time:.1f}% of session
-    - Hard braking events: {hard_braking_time:.1f}% of session"""
+        - Brake: Avg {brake_data.mean():.1f}%, Max {brake_data.max():.1f}%
+        - Braking time: {braking_time:.1f}% - Total time on brakes
+        - Hard braking events: {hard_braking_time:.1f}% - Emergency/late braking
+        - Trail braking: {trail_braking_time:.1f}% - Brake modulation in corners
+        - Braking events: {braking_events} zones - Number of distinct braking phases
+        - Brake release quality: {100 - (abrupt_releases / len(df) * 100):.1f}% smooth releases
+        - Avg braking zone duration: {avg_brake_event_duration:.1f} data points"""
 
         # G-Force Analysis
         if 'G_LAT' in df.columns and 'G_LON' in df.columns:
@@ -320,6 +373,45 @@ class AIAssistant:
     - G-Forces: Max Lateral {max_lat:.2f}g, Max Longitudinal {max_lon:.2f}g
     - Max Combined G-Force: {max_combined_g:.2f}g
     - Cornering intensity: {(lat_g.abs() > 0.5).sum() / len(df) * 100:.1f}% above 0.5g lateral"""
+
+        # Track Section Analysis (NEW)
+        if 'SPEED' in df.columns and 'G_LAT' in df.columns and 'STEERANGLE' in df.columns:
+            context += f"\nTrack Section Identification:"
+
+            # Identify track sections based on telemetry characteristics
+            speed_data = df['SPEED']
+            lat_g_data = df['G_LAT'].abs()
+            steer_data = df['STEERANGLE'].abs()
+
+            # Straights: High speed, low lateral G, minimal steering
+            straights = ((speed_data > speed_data.quantile(0.7)) &
+                         (lat_g_data < 0.2) &
+                         (steer_data < 10)).sum()
+
+            # Slow corners: Low speed, high lateral G, significant steering
+            slow_corners = ((speed_data < speed_data.quantile(0.3)) &
+                            (lat_g_data > 0.4) &
+                            (steer_data > 15)).sum()
+
+            # Fast corners: Medium-high speed, moderate lateral G
+            fast_corners = ((speed_data > speed_data.quantile(0.5)) &
+                            (lat_g_data > 0.3) &
+                            (lat_g_data < 0.8) &
+                            (steer_data > 5)).sum()
+
+            # Braking zones: Decreasing speed with brake application
+            if 'BRAKE' in df.columns:
+                braking_zones = (df['BRAKE'] > 20).sum()
+                context += f"""
+        - Straights identified: {straights / len(df) * 100:.1f}% - Focus on max speed and acceleration
+        - Slow corners identified: {slow_corners / len(df) * 100:.1f}% - Focus on entry speed and apex precision
+        - Fast corners identified: {fast_corners / len(df) * 100:.1f}% - Focus on racing line and commitment
+        - Heavy braking zones: {braking_zones / len(df) * 100:.1f}% - Focus on brake points and trail braking"""
+            else:
+                context += f"""
+        - Straights identified: {straights / len(df) * 100:.1f}% - Focus on max speed and acceleration  
+        - Slow corners identified: {slow_corners / len(df) * 100:.1f}% - Focus on entry speed and apex precision
+        - Fast corners identified: {fast_corners / len(df) * 100:.1f}% - Focus on racing line and commitment"""
 
         # Steering Analysis
         if 'STEERANGLE' in df.columns:
@@ -402,8 +494,33 @@ class AIAssistant:
         if 'SPEED' in df.columns and 'THROTTLE' in df.columns:
             # Calculate throttle-speed correlation for driving smoothness
             throttle_speed_corr = df['THROTTLE'].corr(df['SPEED'])
-            context += f"""
-    - Driving smoothness (throttle-speed correlation): {throttle_speed_corr:.3f}"""
+
+            # Calculate speed consistency in corners vs straights
+            if 'G_LAT' in df.columns:
+                corner_speeds = speed_data[lat_g_data > 0.3]
+                straight_speeds = speed_data[lat_g_data < 0.2]
+
+                corner_consistency = corner_speeds.std() if len(corner_speeds) > 0 else 0
+                straight_consistency = straight_speeds.std() if len(straight_speeds) > 0 else 0
+
+                # Calculate racing line consistency (steering input variance)
+                if 'STEERANGLE' in df.columns:
+                    corner_steering = df[lat_g_data > 0.3]['STEERANGLE']
+                    steering_consistency = corner_steering.std() if len(corner_steering) > 0 else 0
+
+                    context += f"""
+        - Driving smoothness (throttle-speed correlation): {throttle_speed_corr:.3f}
+        - Corner speed consistency: {corner_consistency:.1f} km/h std dev - {'Excellent' if corner_consistency < 5 else 'Good' if corner_consistency < 10 else 'Needs improvement'}
+        - Straight speed consistency: {straight_consistency:.1f} km/h std dev - {'Excellent' if straight_consistency < 3 else 'Good' if straight_consistency < 8 else 'Check acceleration technique'}
+        - Racing line consistency: {steering_consistency:.1f}° steering std dev - {'Very consistent' if steering_consistency < 5 else 'Consistent' if steering_consistency < 10 else 'Work on line consistency'}"""
+                else:
+                    context += f"""
+        - Driving smoothness (throttle-speed correlation): {throttle_speed_corr:.3f}
+        - Corner speed consistency: {corner_consistency:.1f} km/h std dev
+        - Straight speed consistency: {straight_consistency:.1f} km/h std dev"""
+            else:
+                context += f"""
+        - Driving smoothness (throttle-speed correlation): {throttle_speed_corr:.3f}"""
 
         # Lap Data Analysis
         if lap_data:
@@ -421,6 +538,81 @@ class AIAssistant:
     - Lap times: Fastest {fastest_lap:.2f}s, Slowest {slowest_lap:.2f}s, Average {avg_lap:.2f}s
     - Lap consistency (std dev): {lap_consistency:.2f}s
     - Improvement potential: {slowest_lap - fastest_lap:.2f}s between best and worst lap"""
+
+        # Performance Problem Detection (NEW)
+        context += f"\nPerformance Issues Detected:"
+        issues_found = []
+
+        # Check for common problems
+        if 'THROTTLE' in df.columns and 'BRAKE' in df.columns:
+            # Throttle-brake overlap
+            overlap = ((df['THROTTLE'] > 10) & (df['BRAKE'] > 10)).sum() / len(df) * 100
+            if overlap > 1:
+                issues_found.append(f"Throttle-brake overlap: {overlap:.1f}% - Work on pedal separation")
+
+        # Check for late braking (high speed with sudden high brake application)
+        if 'SPEED' in df.columns and 'BRAKE' in df.columns:
+            speed_data = df['SPEED']
+            brake_data = df['BRAKE']
+            late_braking_events = 0
+
+            for i in range(1, len(df)):
+                if (speed_data.iloc[i] > speed_data.quantile(0.7) and
+                        brake_data.iloc[i] > 80 and
+                        brake_data.iloc[i - 1] < 20):
+                    late_braking_events += 1
+
+            if late_braking_events > len(df) * 0.001:  # More than 0.1% of data points
+                issues_found.append(f"Late braking instances: {late_braking_events} - Consider earlier brake points")
+
+        # Check for understeer/oversteer tendencies
+        if all(col in df.columns for col in ['STEERANGLE', 'G_LAT', 'SPEED']):
+            # High steering angle with low lateral G suggests understeer
+            understeer_indicators = ((df['STEERANGLE'].abs() > 15) &
+                                     (df['G_LAT'].abs() < 0.4) &
+                                     (df['SPEED'] > 50)).sum()
+
+            if understeer_indicators > len(df) * 0.05:  # More than 5% of data
+                issues_found.append(
+                    f"Understeer tendency: {understeer_indicators / len(df) * 100:.1f}% - Consider setup changes or entry speed reduction")
+
+        # Check for tire temperature imbalances
+        tire_temp_cols = ['TYRE_TAIR_LF', 'TYRE_TAIR_RF', 'TYRE_TAIR_LR', 'TYRE_TAIR_RR']
+        available_tire_temps = [col for col in tire_temp_cols if col in df.columns]
+
+        if len(available_tire_temps) >= 4:
+            temps = [df[col].mean() for col in available_tire_temps]
+            front_avg = (temps[0] + temps[1]) / 2
+            rear_avg = (temps[2] + temps[3]) / 2
+            left_avg = (temps[0] + temps[2]) / 2
+            right_avg = (temps[1] + temps[3]) / 2
+
+            front_rear_diff = abs(front_avg - rear_avg)
+            left_right_diff = abs(left_avg - right_avg)
+
+            if front_rear_diff > 15:
+                issues_found.append(
+                    f"Tire temp imbalance F/R: {front_rear_diff:.1f}°C - Check brake balance or aero setup")
+            if left_right_diff > 10:
+                issues_found.append(
+                    f"Tire temp imbalance L/R: {left_right_diff:.1f}°C - Check setup symmetry or driving line")
+
+        # Check for gear optimization
+        if 'GEAR' in df.columns and 'RPMS' in df.columns and 'SPEED' in df.columns:
+            # Find instances where RPM is very high in lower gears at high speed
+            high_speed_low_gear = ((df['SPEED'] > speed_data.quantile(0.6)) &
+                                   (df['GEAR'] <= 3) &
+                                   (df['RPMS'] > df['RPMS'].quantile(0.8))).sum()
+
+            if high_speed_low_gear > len(df) * 0.02:
+                issues_found.append(
+                    f"Gear optimization opportunity: {high_speed_low_gear} instances of high RPM in low gears")
+
+        if not issues_found:
+            context += f"\n- No major performance issues detected - Focus on consistency and minor optimizations"
+        else:
+            for issue in issues_found[:5]:  # Limit to top 5 issues
+                context += f"\n- {issue}"
 
         # Data Quality Assessment
         missing_data_cols = df.columns[df.isnull().any()].tolist()
@@ -678,19 +870,39 @@ def render_ai_chat_interface(df: pd.DataFrame, lap_data: dict = None,   game_typ
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("🏁 Analyze Performance", key="quick_perf", disabled=not st.session_state.chat_configured):
-            quick_prompt = "Analyze my overall performance. What are the key insights from this data?"
+            quick_prompt = "Analyze my driving performance data. Focus on: 1) Where I'm losing time compared to optimal, 2) Specific cornering technique issues, 3) Throttle and brake application patterns, 4) Racing line consistency. Provide specific sector-based feedback and measurable improvement targets."
             st.session_state.chat_messages.append({"role": "user", "content": quick_prompt})
             st.rerun()
 
     with col2:
         if st.button("⚡ Find Improvements", key="quick_improve", disabled=not st.session_state.chat_configured):
-            quick_prompt = "What are the top 3 areas where I can improve my lap times?"
+            quick_prompt = "Identify my top 3 lap time improvement opportunities with specific data points. For each issue: 1) Quantify the time loss, 2) Explain the technical cause, 3) Provide exact technique changes needed, 4) Give measurable targets (speeds, brake points, throttle %). Focus on the biggest gains first."
             st.session_state.chat_messages.append({"role": "user", "content": quick_prompt})
             st.rerun()
 
     with col3:
         if st.button("🔧 Setup Advice", key="quick_setup", disabled=not st.session_state.chat_configured):
-            quick_prompt = "Based on my data, what setup changes would you recommend?"
+            quick_prompt = "Analyze my car setup based on telemetry patterns. Check: 1) Tire temperature balance and pressure optimization, 2) Brake balance from brake temp data, 3) Suspension issues from G-force patterns, 4) Aerodynamic balance from speed/handling correlation. Recommend specific setup changes with reasoning."
+            st.session_state.chat_messages.append({"role": "user", "content": quick_prompt})
+            st.rerun()
+
+    # Add second row of more specific buttons
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        if st.button("🎯 Corner Analysis", key="quick_corners", disabled=not st.session_state.chat_configured):
+            quick_prompt = "Analyze my cornering technique in detail. Examine: 1) Entry speeds vs optimal, 2) Apex timing and positioning, 3) Exit acceleration patterns, 4) Trail braking effectiveness, 5) Steering input quality. Identify the worst 3 corners and best 3 corners with specific improvement advice."
+            st.session_state.chat_messages.append({"role": "user", "content": quick_prompt})
+            st.rerun()
+
+    with col5:
+        if st.button("🚦 Brake Points", key="quick_brakes", disabled=not st.session_state.chat_configured):
+            quick_prompt = "Analyze my braking performance and optimization. Check: 1) Brake point timing - am I braking too early/late? 2) Brake pressure application - initial bite vs modulation, 3) Trail braking zones and effectiveness, 4) Brake release timing for corner entry, 5) Brake temperature management. Give specific brake point adjustments."
+            st.session_state.chat_messages.append({"role": "user", "content": quick_prompt})
+            st.rerun()
+
+    with col6:
+        if st.button("🏎️ Consistency Check", key="quick_consistency", disabled=not st.session_state.chat_configured):
+            quick_prompt = "Evaluate my driving consistency and identify inconsistency patterns. Analyze: 1) Lap-to-lap variation in key sectors, 2) Steering input repeatability, 3) Throttle/brake application consistency, 4) Speed consistency through corners, 5) Where I'm most/least consistent. Provide specific drills to improve consistency."
             st.session_state.chat_messages.append({"role": "user", "content": quick_prompt})
             st.rerun()
 
