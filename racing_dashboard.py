@@ -6,9 +6,14 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from datetime import datetime
 import warnings
+import json
+import requests
+import time
+from typing import Optional
 
 warnings.filterwarnings('ignore')
 
+# Set page config
 # Set page config
 st.set_page_config(
     page_title="Racing Telemetry Dashboard",
@@ -17,7 +22,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+
+# Simplified CSS for better styling (removed problematic fixed positioning)
 st.markdown("""
 <style>
     .main-header {
@@ -38,12 +44,131 @@ st.markdown("""
     .stSelectbox > div > div {
         background-color: #f0f2f6;
     }
+    .chat-container {
+        background: white;
+        border: 2px solid #667eea;
+        border-radius: 15px;
+        padding: 20px;
+        margin: 20px 0;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    }
+    .chat-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+        text-align: center;
+        font-weight: bold;
+    }
+    .chat-message {
+        margin-bottom: 15px;
+        padding: 12px 15px;
+        border-radius: 15px;
+        word-wrap: break-word;
+    }
+    .user-message {
+        background: #007bff;
+        color: white;
+        margin-left: 20%;
+        text-align: right;
+    }
+    .ai-message {
+        background: #f8f9fa;
+        color: #333;
+        border: 2px solid #e9ecef;
+        margin-right: 20%;
+    }
+    .api-config {
+        background: #f8f9fa;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+        border-left: 4px solid #667eea;
+    }
+    .quick-buttons {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin: 15px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
+# Column mappings for different games
+ACC_COLUMN_MAP = {
+    'Time': 'Time',
+    'SPEED': 'SPEED',
+    'THROTTLE': 'THROTTLE',
+    'BRAKE': 'BRAKE',
+    'STEERANGLE': 'STEERANGLE',
+    'RPMS': 'RPMS',
+    'GEAR': 'GEAR',
+    'G_LAT': 'G_LAT',
+    'G_LON': 'G_LON',
+    'LAP_BEACON': 'LAP_BEACON',
+    'CLUTCH': 'CLUTCH',
+    'BRAKE_TEMP_LF': 'BRAKE_TEMP_LF',
+    'BRAKE_TEMP_RF': 'BRAKE_TEMP_RF',
+    'BRAKE_TEMP_LR': 'BRAKE_TEMP_LR',
+    'BRAKE_TEMP_RR': 'BRAKE_TEMP_RR',
+    'TYRE_TAIR_LF': 'TYRE_TAIR_LF',
+    'TYRE_TAIR_RF': 'TYRE_TAIR_RF',
+    'TYRE_TAIR_LR': 'TYRE_TAIR_LR',
+    'TYRE_TAIR_RR': 'TYRE_TAIR_RR'
+}
+
+LMU_COLUMN_MAP = {
+    'Time': 'Time',
+    'SPEED': 'Ground Speed',
+    'THROTTLE': 'Throttle Pos',
+    'BRAKE': 'Brake Pos',
+    'STEERANGLE': 'Steering',
+    'RPMS': 'Engine RPM',
+    'GEAR': 'Gear',
+    'G_LAT': 'G Force Lat',
+    'G_LON': 'G Force Long',
+    'LAP_BEACON': 'Lap Number',
+    'CLUTCH': 'Clutch Pos',
+    'BRAKE_TEMP_LF': 'Brake Temp FL',
+    'BRAKE_TEMP_RF': 'Brake Temp FR',
+    'BRAKE_TEMP_LR': 'Brake Temp RL',
+    'BRAKE_TEMP_RR': 'Brake Temp RR',
+    'TYRE_TAIR_LF': 'Tyre Temp FL Centre',
+    'TYRE_TAIR_RF': 'Tyre Temp FR Centre',
+    'TYRE_TAIR_LR': 'Tyre Temp RL Centre',
+    'TYRE_TAIR_RR': 'Tyre Temp RR Centre',
+    'TYRE_PRESS_LF': 'Tyre Pressure FL',
+    'TYRE_PRESS_RF': 'Tyre Pressure FR',
+    'TYRE_PRESS_LR': 'Tyre Pressure RL',
+    'TYRE_PRESS_RR': 'Tyre Pressure RR',
+    'WHEEL_SPEED_LF': 'Wheel Rot Speed FL',
+    'WHEEL_SPEED_RF': 'Wheel Rot Speed FR',
+    'WHEEL_SPEED_LR': 'Wheel Rot Speed RL',
+    'WHEEL_SPEED_RR': 'Wheel Rot Speed RR',
+    'FUEL_LEVEL': 'Fuel Level',
+    'ENG_WATER_TEMP': 'Eng Water Temp',
+    'ENG_OIL_TEMP': 'Eng Oil Temp'
+}
+
+def normalize_column_names(df, game_type):
+    """Normalize column names based on game type"""
+    column_map = LMU_COLUMN_MAP if game_type == "Le Mans Ultimate" else ACC_COLUMN_MAP
+
+    # Create reverse mapping to rename columns to standard names
+    reverse_map = {}
+    for standard_name, game_name in column_map.items():
+        if game_name in df.columns:
+            reverse_map[game_name] = standard_name
+
+    # Rename columns
+    df = df.rename(columns=reverse_map)
+
+    return df
+
 @st.cache_data
-def load_and_sample_data(file, sample_size=50000):
+def load_and_sample_data(file, sample_size=50000, game_type="Assetto Corsa Competizione"):
     """Load and intelligently sample the CSV data for performance"""
     try:
         # First, read just a few rows to get column info
@@ -70,11 +195,22 @@ def load_and_sample_data(file, sample_size=50000):
         # Clean column names
         df.columns = df.columns.str.strip().str.replace('"', '')
 
+        # Normalize column names based on game type
+        df = normalize_column_names(df, game_type)
+
         # Efficient type conversion - only convert columns we'll actually use
         key_numeric_columns = [
             'Time', 'G_LAT', 'ROTY', 'STEERANGLE', 'SPEED', 'THROTTLE',
             'BRAKE', 'GEAR', 'G_LON', 'CLUTCH', 'RPMS'
         ]
+
+        # Add LMU-specific columns for conversion
+        if game_type == "Le Mans Ultimate":
+            key_numeric_columns.extend([
+                'FUEL_LEVEL', 'ENG_WATER_TEMP', 'ENG_OIL_TEMP',
+                'TYRE_PRESS_LF', 'TYRE_PRESS_RF', 'TYRE_PRESS_LR', 'TYRE_PRESS_RR',
+                'WHEEL_SPEED_LF', 'WHEEL_SPEED_RF', 'WHEEL_SPEED_LR', 'WHEEL_SPEED_RR'
+            ])
 
         for col in key_numeric_columns:
             if col in df.columns:
@@ -99,6 +235,539 @@ def load_and_sample_data(file, sample_size=50000):
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
         return None, 0
+
+
+class AIAssistant:
+    """AI Assistant for racing data analysis"""
+
+    def __init__(self):
+        self.api_type = None
+        self.api_key = None
+        self.base_url = None
+        self.model = None
+
+    def configure(self, api_type: str, api_key: str = None, base_url: str = None, model: str = None):
+        """Configure the AI assistant with API details"""
+        self.api_type = api_type.lower()
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+
+    def get_data_context(self, df: pd.DataFrame, lap_data: dict = None, game_type: str = "Assetto Corsa Competizione") -> str:
+        """Generate comprehensive context about the current racing data"""
+        import numpy as np
+
+        context = f"""
+    Current Racing Data Analysis ({game_type}):
+
+    Dataset Overview:
+    - Total rows: {len(df):,}
+    - Time range: {df['Time'].min():.1f}s to {df['Time'].max():.1f}s ({df['Time'].max() - df['Time'].min():.1f}s duration)
+    - Data frequency: {1 / (df['Time'].iloc[1] - df['Time'].iloc[0]):.0f} Hz
+    - Available columns: {len(df.columns)} parameters
+
+    Performance Metrics:"""
+
+        # Speed Analysis
+        if 'SPEED' in df.columns:
+            speed_data = df['SPEED']
+            context += f"""
+    - Speed: Max {speed_data.max():.1f} km/h, Avg {speed_data.mean():.1f} km/h, Min {speed_data.min():.1f} km/h
+    - Speed variance: {speed_data.std():.1f} km/h (consistency indicator)"""
+
+            # Speed zones analysis
+            high_speed = (speed_data > speed_data.quantile(0.8)).sum()
+            low_speed = (speed_data < speed_data.quantile(0.2)).sum()
+            context += f"""
+    - High speed zones (>80th percentile): {high_speed / len(df) * 100:.1f}% of time
+    - Low speed zones (<20th percentile): {low_speed / len(df) * 100:.1f}% of time"""
+
+        # Engine Analysis
+        if 'RPMS' in df.columns:
+            rpm_data = df['RPMS']
+            context += f"""
+    - RPM: Max {rpm_data.max():.0f}, Avg {rpm_data.mean():.0f}, Min {rpm_data.min():.0f}
+    - Engine load distribution: {(rpm_data > rpm_data.mean()).sum() / len(df) * 100:.1f}% above average RPM"""
+
+        # Throttle and Brake Analysis
+        if 'THROTTLE' in df.columns:
+            throttle_data = df['THROTTLE']
+            full_throttle_time = (throttle_data > 95).sum() / len(df) * 100
+            partial_throttle_time = ((throttle_data > 10) & (throttle_data <= 95)).sum() / len(df) * 100
+            context += f"""
+    - Throttle: Avg {throttle_data.mean():.1f}%, Max {throttle_data.max():.1f}%
+    - Full throttle time: {full_throttle_time:.1f}% of session
+    - Partial throttle time: {partial_throttle_time:.1f}% of session"""
+
+        if 'BRAKE' in df.columns:
+            brake_data = df['BRAKE']
+            braking_time = (brake_data > 5).sum() / len(df) * 100
+            hard_braking_time = (brake_data > 80).sum() / len(df) * 100
+            context += f"""
+    - Brake: Avg {brake_data.mean():.1f}%, Max {brake_data.max():.1f}%
+    - Braking time: {braking_time:.1f}% of session
+    - Hard braking events: {hard_braking_time:.1f}% of session"""
+
+        # G-Force Analysis
+        if 'G_LAT' in df.columns and 'G_LON' in df.columns:
+            lat_g = df['G_LAT']
+            lon_g = df['G_LON']
+            max_lat = lat_g.abs().max()
+            max_lon = lon_g.abs().max()
+            max_combined_g = np.sqrt(lat_g ** 2 + lon_g ** 2).max()
+
+            context += f"""
+    - G-Forces: Max Lateral {max_lat:.2f}g, Max Longitudinal {max_lon:.2f}g
+    - Max Combined G-Force: {max_combined_g:.2f}g
+    - Cornering intensity: {(lat_g.abs() > 0.5).sum() / len(df) * 100:.1f}% above 0.5g lateral"""
+
+        # Steering Analysis
+        if 'STEERANGLE' in df.columns:
+            steer_data = df['STEERANGLE']
+            max_steer = steer_data.abs().max()
+            avg_steer_input = steer_data.abs().mean()
+            context += f"""
+    - Steering: Max angle {max_steer:.1f}°, Avg input {avg_steer_input:.1f}°
+    - Sharp turns: {(steer_data.abs() > steer_data.abs().quantile(0.9)).sum()} instances"""
+
+        # Gear Analysis
+        if 'GEAR' in df.columns:
+            gear_data = df['GEAR']
+            gear_distribution = gear_data.value_counts().sort_index()
+            max_gear = gear_data.max()
+            context += f"""
+    - Gears: Max gear {max_gear}, Most used: Gear {gear_distribution.idxmax()} ({gear_distribution.max() / len(df) * 100:.1f}% of time)
+    - Gear distribution: {dict(gear_distribution.head(5))}"""
+
+        # Suspension Travel Analysis
+        suspension_cols = [col for col in df.columns if 'SUS_TRAVEL' in col]
+        if suspension_cols:
+            context += f"\nSuspension Analysis:"
+            for col in suspension_cols:
+                sus_data = df[col]
+                context += f"""
+    - {col}: Range {sus_data.min():.1f} to {sus_data.max():.1f}mm, Avg {sus_data.mean():.1f}mm"""
+
+        # Brake Temperature Analysis
+        brake_temp_cols = [col for col in df.columns if 'BRAKE_TEMP' in col]
+        if brake_temp_cols:
+            context += f"\nBrake Temperature Analysis:"
+            for col in brake_temp_cols:
+                temp_data = df[col]
+                context += f"""
+    - {col}: Max {temp_data.max():.0f}°C, Avg {temp_data.mean():.0f}°C"""
+
+        # Tire Analysis
+        tire_pressure_cols = [col for col in df.columns if 'TYRE_PRESS' in col]
+        tire_temp_cols = [col for col in df.columns if 'TYRE_TAIR' in col]
+        wheel_speed_cols = [col for col in df.columns if 'WHEEL_SPEED' in col]
+
+        if tire_pressure_cols or tire_temp_cols or wheel_speed_cols:
+            context += f"\nTire Analysis:"
+
+            if tire_pressure_cols:
+                pressures = [df[col].mean() for col in tire_pressure_cols]
+                context += f"""
+    - Avg tire pressures: LF:{df[tire_pressure_cols[0]].mean():.1f}, RF:{df[tire_pressure_cols[1]].mean():.1f}, LR:{df[tire_pressure_cols[2]].mean():.1f}, RR:{df[tire_pressure_cols[3]].mean():.1f}"""
+
+            if tire_temp_cols:
+                temps = [df[col].mean() for col in tire_temp_cols]
+                context += f"""
+    - Avg tire temps: LF:{df[tire_temp_cols[0]].mean():.0f}°C, RF:{df[tire_temp_cols[1]].mean():.0f}°C, LR:{df[tire_temp_cols[2]].mean():.0f}°C, RR:{df[tire_temp_cols[3]].mean():.0f}°C"""
+
+            if wheel_speed_cols:
+                # Detect potential wheel spin/lock
+                wheel_speeds = [df[col] for col in wheel_speed_cols]
+                if len(wheel_speeds) >= 4:
+                    front_avg = (wheel_speeds[0] + wheel_speeds[1]) / 2
+                    rear_avg = (wheel_speeds[2] + wheel_speeds[3]) / 2
+                    speed_diff = (front_avg - rear_avg).abs().mean()
+                    context += f"""
+    - Front/Rear speed difference: {speed_diff:.2f} m/s avg (wheel slip indicator)"""
+
+        # Traction Control and ABS Analysis
+        if 'TC' in df.columns:
+            tc_active = (df['TC'] > 0).sum()
+            if tc_active > 0:
+                context += f"""
+    - Traction Control: Active for {tc_active} samples ({tc_active / len(df) * 100:.1f}% of time)"""
+
+        if 'ABS' in df.columns:
+            abs_active = (df['ABS'] > 0).sum()
+            if abs_active > 0:
+                context += f"""
+    - ABS: Active for {abs_active} samples ({abs_active / len(df) * 100:.1f}% of time)"""
+
+        # Performance Consistency Analysis
+        if 'SPEED' in df.columns and 'THROTTLE' in df.columns:
+            # Calculate throttle-speed correlation for driving smoothness
+            throttle_speed_corr = df['THROTTLE'].corr(df['SPEED'])
+            context += f"""
+    - Driving smoothness (throttle-speed correlation): {throttle_speed_corr:.3f}"""
+
+        # Lap Data Analysis
+        if lap_data:
+            context += f"\nLap Performance Analysis:"
+            context += f"- Number of laps: {len(lap_data)}"
+
+            lap_times = [lap_data[lap]['duration'] for lap in lap_data.keys()]
+            if len(lap_times) > 1:
+                fastest_lap = min(lap_times)
+                slowest_lap = max(lap_times)
+                avg_lap = sum(lap_times) / len(lap_times)
+                lap_consistency = np.std(lap_times)
+
+                context += f"""
+    - Lap times: Fastest {fastest_lap:.2f}s, Slowest {slowest_lap:.2f}s, Average {avg_lap:.2f}s
+    - Lap consistency (std dev): {lap_consistency:.2f}s
+    - Improvement potential: {slowest_lap - fastest_lap:.2f}s between best and worst lap"""
+
+        # Data Quality Assessment
+        missing_data_cols = df.columns[df.isnull().any()].tolist()
+        if missing_data_cols:
+            context += f"""
+    Data Quality Notes:
+    - Columns with missing data: {', '.join(missing_data_cols[:5])}{'...' if len(missing_data_cols) > 5 else ''}"""
+
+        context += f"""
+
+    Advanced Analysis Capabilities Available:
+    - Sector-by-sector performance comparison
+    - Cornering speed analysis and racing line optimization  
+    - Brake point optimization and trail-braking analysis
+    - Throttle application timing and traction management
+    - Suspension setup analysis for handling balance
+    - Tire degradation and pressure optimization
+    - Engine mapping efficiency analysis
+    - Aerodynamic balance assessment through speed/g-force correlation
+    - Driver consistency metrics and improvement areas
+    - Setup recommendations based on track characteristics
+
+    I can provide detailed insights into driving technique, car setup optimization, performance gaps, and specific recommendations for lap time improvement."""
+
+        return context
+
+    def call_openai_api(self, messages: list) -> str:
+        """Call OpenAI/ChatGPT API"""
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+
+            data = {
+                "model": self.model or "gpt-3.5-turbo",
+                "messages": messages,
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                return response.json()["choices"][0]["message"]["content"]
+            else:
+                return f"API Error: {response.status_code} - {response.text}"
+
+        except Exception as e:
+            return f"Error calling OpenAI API: {str(e)}"
+
+    def call_gemini_api(self, messages: list) -> str:
+        """Call Google Gemini API"""
+        try:
+            # Convert messages to Gemini format
+            prompt = ""
+            for msg in messages:
+                if msg["role"] == "system":
+                    prompt += f"System: {msg['content']}\n"
+                elif msg["role"] == "user":
+                    prompt += f"User: {msg['content']}\n"
+                elif msg["role"] == "assistant":
+                    prompt += f"Assistant: {msg['content']}\n"
+
+            data = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }]
+            }
+
+            response = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{self.model or 'gemini-2.5-flash'}:generateContent?key={self.api_key}",
+                json=data,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                return result["candidates"][0]["content"]["parts"][0]["text"]
+            else:
+                return f"Gemini API Error: {response.status_code} - {response.text}"
+
+        except Exception as e:
+            return f"Error calling Gemini API: {str(e)}"
+
+    def call_ollama_api(self, messages: list) -> str:
+        """Call Ollama local API"""
+        try:
+            # Convert messages format for Ollama
+            prompt = ""
+            for msg in messages:
+                if msg["role"] == "system":
+                    prompt += f"System: {msg['content']}\n"
+                elif msg["role"] == "user":
+                    prompt += f"User: {msg['content']}\n"
+                elif msg["role"] == "assistant":
+                    prompt += f"Assistant: {msg['content']}\n"
+
+            data = {
+                "model": self.model or "llama2",
+                "prompt": prompt,
+                "stream": False
+            }
+
+            base_url = self.base_url or "http://localhost:11434"
+            response = requests.post(
+                f"{base_url}/api/generate",
+                json=data,
+                timeout=60
+            )
+
+            if response.status_code == 200:
+                return response.json()["response"]
+            else:
+                return f"Ollama API Error: {response.status_code} - {response.text}"
+
+        except Exception as e:
+            return f"Error calling Ollama API: {str(e)}"
+
+    def get_response(self, user_message: str, data_context: str, chat_history: list = None) -> str:
+        """Get AI response based on configured API"""
+        if not self.api_type:
+            return "Please configure an AI API first in the chat settings."
+
+        # Build messages
+        messages = [
+            {
+                "role": "system",
+                "content": f"""You are a racing telemetry data analysis expert. You help users understand their racing data, improve lap times, and optimize performance.
+
+{data_context}
+
+Provide helpful, concise answers about racing performance, data interpretation, and improvement suggestions. Focus on actionable insights."""
+            }
+        ]
+
+        # Add chat history
+        if chat_history:
+            messages.extend(chat_history[-10:])  # Keep last 10 messages
+
+        # Add current user message
+        messages.append({"role": "user", "content": user_message})
+
+        # Call appropriate API
+        if self.api_type == "openai":
+            return self.call_openai_api(messages)
+        elif self.api_type == "gemini":
+            return self.call_gemini_api(messages)
+        elif self.api_type == "ollama":
+            return self.call_ollama_api(messages)
+        else:
+            return "Unsupported API type. Please use 'openai', 'gemini', or 'ollama'."
+
+
+def render_ai_chat_interface(df: pd.DataFrame, lap_data: dict = None,   game_type: str = "Assetto Corsa Competizione"):
+    """Render the AI chat interface as a dedicated section"""
+
+    # Initialize session state for chat
+    if 'chat_messages' not in st.session_state:
+        st.session_state.chat_messages = []
+    if 'ai_assistant' not in st.session_state:
+        st.session_state.ai_assistant = AIAssistant()
+    if 'chat_configured' not in st.session_state:
+        st.session_state.chat_configured = False
+
+    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+
+    # Chat header
+    st.markdown('<div class="chat-header">🤖 Racing Data AI Assistant</div>', unsafe_allow_html=True)
+
+    # API Configuration Section
+    st.markdown('<div class="api-config">', unsafe_allow_html=True)
+    st.markdown("**⚙️ Configure AI Assistant**")
+
+    col1, col2, col3 = st.columns([2, 2, 1])
+
+    with col1:
+        api_type = st.selectbox(
+            "AI Provider:",
+            ["openai", "gemini", "ollama"],
+            index=0,
+            help="Choose your AI provider",
+            key="ai_provider_select"
+        )
+
+    with col2:
+        if api_type == "openai":
+            model = st.selectbox("Model:", ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"],
+                                 index=0, key="openai_model")
+            api_input_label = "OpenAI API Key:"
+            api_help = "Enter your OpenAI API key"
+            show_url_input = False
+        elif api_type == "gemini":
+            model = st.selectbox("Model:", ["gemini-2.5-flash", "gemini-pro-vision"],
+                                 index=0, key="gemini_model")
+            api_input_label = "Gemini API Key:"
+            api_help = "Enter your Google Gemini API key"
+            show_url_input = False
+        else:  # ollama
+            model = st.text_input("Model:", value="llama2",
+                                  help="e.g., llama2, mistral, codellama", key="ollama_model")
+            api_input_label = "Ollama URL:"
+            api_help = "Your Ollama server URL"
+            show_url_input = True
+
+    with col3:
+        if st.button("Configure", key="configure_ai_btn", type="primary"):
+            if api_type in ["openai", "gemini"]:
+                api_key = st.session_state.get(f"{api_type}_api_key", "")
+                if api_key.strip():
+                    st.session_state.ai_assistant.configure(api_type, api_key.strip(), None, model)
+                    st.session_state.chat_configured = True
+                    st.success(f"✅ {api_type.title()} configured!")
+                else:
+                    st.error(f"Please enter your {api_type.title()} API key")
+            else:  # ollama
+                base_url = st.session_state.get("ollama_url", "http://localhost:11434")
+                st.session_state.ai_assistant.configure(api_type, None, base_url, model)
+                st.session_state.chat_configured = True
+                st.success(f"✅ Ollama configured!")
+
+    # API key/URL input
+    if not show_url_input:
+        st.text_input(
+            api_input_label,
+            type="password",
+            help=api_help,
+            key=f"{api_type}_api_key",
+            placeholder=f"Enter your {api_type.title()} API key here..."
+        )
+    else:
+        st.text_input(
+            api_input_label,
+            value="http://localhost:11434",
+            help=api_help,
+            key="ollama_url"
+        )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Configuration status
+    if st.session_state.chat_configured:
+        st.success(f"✅ AI Assistant ready with {st.session_state.ai_assistant.api_type.title()}")
+    else:
+        st.info("👆 Configure an AI provider above to start chatting")
+
+    # Quick action buttons
+    st.markdown("**🚀 Quick Questions:**")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("🏁 Analyze Performance", key="quick_perf", disabled=not st.session_state.chat_configured):
+            quick_prompt = "Analyze my overall performance. What are the key insights from this data?"
+            st.session_state.chat_messages.append({"role": "user", "content": quick_prompt})
+            st.rerun()
+
+    with col2:
+        if st.button("⚡ Find Improvements", key="quick_improve", disabled=not st.session_state.chat_configured):
+            quick_prompt = "What are the top 3 areas where I can improve my lap times?"
+            st.session_state.chat_messages.append({"role": "user", "content": quick_prompt})
+            st.rerun()
+
+    with col3:
+        if st.button("🔧 Setup Advice", key="quick_setup", disabled=not st.session_state.chat_configured):
+            quick_prompt = "Based on my data, what setup changes would you recommend?"
+            st.session_state.chat_messages.append({"role": "user", "content": quick_prompt})
+            st.rerun()
+
+    # Chat messages display
+    if st.session_state.chat_messages:
+        st.markdown("**💬 Chat History:**")
+
+        # Create a container for messages
+        for i, message in enumerate(st.session_state.chat_messages):
+            if message["role"] == "user":
+                st.markdown(f'<div class="chat-message user-message">{message["content"]}</div>',
+                            unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="chat-message ai-message">{message["content"]}</div>',
+                            unsafe_allow_html=True)
+
+    # Chat input
+    if st.session_state.chat_configured:
+        user_input = st.text_input(
+            "Ask about your racing data:",
+            placeholder="e.g., 'How can I improve my cornering?' or 'What's my braking pattern?'",
+            key="chat_input"
+        )
+
+        col1, col2 = st.columns([1, 6])
+        with col1:
+            send_button = st.button("Send", key="send_chat", type="primary")
+        with col2:
+            if st.button("🗑️ Clear Chat", key="clear_chat"):
+                st.session_state.chat_messages = []
+                st.rerun()
+
+        # Process chat input
+        if send_button and user_input.strip():
+            # Add user message
+            st.session_state.chat_messages.append({"role": "user", "content": user_input.strip()})
+
+            # Generate data context
+            data_context = st.session_state.ai_assistant.get_data_context(df, lap_data, game_type)
+
+            # Get AI response
+            with st.spinner("AI is thinking..."):
+                response = st.session_state.ai_assistant.get_response(
+                    user_input.strip(),
+                    data_context,
+                    st.session_state.chat_messages[:-1]  # Exclude the current message
+                )
+
+            # Add assistant response
+            st.session_state.chat_messages.append({"role": "assistant", "content": response})
+            st.rerun()
+
+        # Handle quick prompts
+        if len(st.session_state.chat_messages) > 0 and st.session_state.chat_messages[-1]["role"] == "user":
+            last_message = st.session_state.chat_messages[-1]["content"]
+
+            # Check if this is a new quick prompt that needs a response
+            if len(st.session_state.chat_messages) == 1 or (
+                    len(st.session_state.chat_messages) >= 2 and
+                    st.session_state.chat_messages[-2]["role"] == "assistant"
+            ):
+                # Generate data context
+                data_context = st.session_state.ai_assistant.get_data_context(df, lap_data, game_type)
+
+                # Get AI response
+                with st.spinner("AI is analyzing your data..."):
+                    response = st.session_state.ai_assistant.get_response(
+                        last_message,
+                        data_context,
+                        st.session_state.chat_messages[:-1]
+                    )
+
+                # Add assistant response
+                st.session_state.chat_messages.append({"role": "assistant", "content": response})
+                st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def sample_for_plotting(df, max_points=5000):
@@ -318,8 +987,8 @@ def create_gforce_map(df):
     return fig
 
 
-def extract_lap_data(df):
-    """Extract individual lap data from telemetry"""
+def extract_lap_data(df, num_sectors=3):
+    """Extract individual lap data from telemetry with sector analysis"""
     if 'LAP_BEACON' not in df.columns:
         return None
 
@@ -341,8 +1010,33 @@ def extract_lap_data(df):
             lap_stats = {
                 'lap_number': lap_num,
                 'duration': lap_df['LAP_TIME'].max(),
-                'data': lap_df
+                'data': lap_df,
+                'sectors': {}
             }
+
+            # Calculate sector times
+            total_time = lap_df['LAP_TIME'].max()
+            sector_duration = total_time / num_sectors
+
+            for sector in range(num_sectors):
+                start_time = sector * sector_duration
+                end_time = (sector + 1) * sector_duration
+
+                sector_df = lap_df[(lap_df['LAP_TIME'] >= start_time) &
+                                   (lap_df['LAP_TIME'] <= end_time)]
+
+                if len(sector_df) > 0:
+                    # Calculate actual time spent in this sector based on data points
+                    actual_sector_time = sector_df['LAP_TIME'].max() - sector_df['LAP_TIME'].min()
+                    if actual_sector_time <= 0:
+                        actual_sector_time = sector_duration
+
+                    lap_stats['sectors'][f'S{sector + 1}'] = {
+                        'time': actual_sector_time,
+                        'avg_speed': sector_df['SPEED'].mean() if 'SPEED' in sector_df else 0,
+                        'max_speed': sector_df['SPEED'].max() if 'SPEED' in sector_df else 0,
+                        'avg_throttle': sector_df['THROTTLE'].mean() if 'THROTTLE' in sector_df else 0
+                    }
 
             if 'SPEED' in lap_df.columns:
                 lap_stats['max_speed'] = lap_df['SPEED'].max()
@@ -365,6 +1059,158 @@ def extract_lap_data(df):
             lap_data[lap_num] = lap_stats
 
     return lap_data
+
+
+def format_time_mmss(seconds):
+    """Convert seconds to mm:ss.xxx format"""
+    if seconds is None or seconds <= 0:
+        return "N/A"
+
+    minutes = int(seconds // 60)
+    remaining_seconds = seconds % 60
+    return f"{minutes:02d}:{remaining_seconds:06.3f}"
+
+
+def create_lap_times_table_with_sectors(lap_data, num_sectors=3):
+    """Create a comprehensive lap times table with sector analysis and highlighting"""
+    if not lap_data:
+        return None
+
+    # Prepare data for the table
+    table_data = []
+
+    for lap_num, lap_info in lap_data.items():
+        row = {
+            'Lap': int(lap_num),
+            'Lap Time': format_time_mmss(lap_info['duration'])
+        }
+
+        # Add sector times
+        total_sector_time = 0
+        for sector in range(1, num_sectors + 1):
+            sector_key = f'S{sector}'
+            if sector_key in lap_info.get('sectors', {}):
+                sector_time = lap_info['sectors'][sector_key]['time']
+                row[f'Sector {sector}'] = format_time_mmss(sector_time)
+                total_sector_time += sector_time
+            else:
+                row[f'Sector {sector}'] = "N/A"
+
+        # Add performance metrics
+        row['Max Speed'] = f"{lap_info.get('max_speed', 0):.1f}"
+        row['Avg Speed'] = f"{lap_info.get('avg_speed', 0):.1f}"
+        row['Avg Throttle'] = f"{lap_info.get('avg_throttle', 0):.1f}%"
+
+        table_data.append(row)
+
+    # Convert to DataFrame
+    df_table = pd.DataFrame(table_data)
+
+    # Sort by lap number
+    df_table = df_table.sort_values('Lap')
+
+    return df_table
+
+
+def create_lap_times_chart(lap_data):
+    """Create lap times progression chart"""
+    if not lap_data or len(lap_data) < 2:
+        return None
+
+    # Prepare data
+    laps = []
+    times = []
+
+    for lap_num, lap_info in sorted(lap_data.items()):
+        laps.append(int(lap_num))
+        times.append(lap_info['duration'])
+
+    # Find best lap time for highlighting
+    best_time = min(times)
+    best_lap_idx = times.index(best_time)
+
+    # Create colors array (highlight best lap)
+    colors = ['lightblue'] * len(times)
+    colors[best_lap_idx] = 'gold'
+
+    fig = go.Figure()
+
+    # Add bar chart
+    fig.add_trace(go.Bar(
+        x=laps,
+        y=times,
+        name='Lap Times',
+        marker_color=colors,
+        text=[f"{t:.3f}s" for t in times],
+        textposition='outside'
+    ))
+
+    # Add best lap line
+    fig.add_hline(y=best_time, line_dash="dash", line_color="green",
+                  annotation_text=f"Best: {best_time:.3f}s")
+
+    # Add average line
+    avg_time = sum(times) / len(times)
+    fig.add_hline(y=avg_time, line_dash="dot", line_color="orange",
+                  annotation_text=f"Average: {avg_time:.3f}s")
+
+    fig.update_layout(
+        title="Lap Times Progression",
+        xaxis_title="Lap Number",
+        yaxis_title="Time (seconds)",
+        height=400,
+        showlegend=False
+    )
+
+    return fig
+
+
+def parse_time_to_seconds(time_str):
+    """Convert mm:ss.xxx format back to seconds"""
+    if 'N/A' in str(time_str):
+        return float('inf')
+
+    try:
+        parts = str(time_str).split(':')
+        if len(parts) == 2:
+            minutes = int(parts[0])
+            seconds = float(parts[1])
+            return minutes * 60 + seconds
+        else:
+            return float('inf')
+    except:
+        return float('inf')
+
+
+def highlight_best_sectors_and_times(df_table, num_sectors=3):
+    """Apply styling to highlight best sectors and lap times"""
+    if df_table is None or df_table.empty:
+        return None
+
+    # Create a copy for styling
+    styled_df = df_table.copy()
+
+    # Find best lap time (convert mm:ss.xxx back to seconds for comparison)
+    lap_times = []
+    for time_str in df_table['Lap Time']:
+        lap_times.append(parse_time_to_seconds(time_str))
+
+    best_lap_time = min(lap_times) if lap_times else 0
+    best_lap_idx = lap_times.index(best_lap_time) if lap_times else -1
+
+    # Find best sector times
+    best_sectors = {}
+    for sector in range(1, num_sectors + 1):
+        sector_col = f'Sector {sector}'
+        if sector_col in df_table.columns:
+            sector_times = []
+            for time_str in df_table[sector_col]:
+                sector_times.append(parse_time_to_seconds(time_str))
+
+            if sector_times and min(sector_times) < float('inf'):
+                best_sectors[sector_col] = min(sector_times)
+
+    return styled_df, best_lap_idx, best_sectors
 
 
 def create_lap_comparison_charts(lap_data, selected_laps):
@@ -579,14 +1425,23 @@ def create_sector_analysis(lap_data, selected_laps, num_sectors=3):
 
 # Main Dashboard
 def main():
-    st.markdown('<h1 class="main-header">🏎️ Racing Telemetry Dashboard (Optimized)</h1>', unsafe_allow_html=True)
+    # Game selection at the top (moved from earlier)
+    col1, col2, col3 = st.columns([2, 1, 2])
+    with col2:
+        game_selection = st.radio(
+            "Select Racing Game:",
+            ["Assetto Corsa Competizione", "Le Mans Ultimate"],
+            index=0,
+            key="game_select",
+            help="Choose your racing simulation for proper data format handling"
+        )
 
     # Sidebar
-    st.sidebar.header("📁 Data Upload")
+    st.sidebar.header("Data Upload")
     uploaded_file = st.sidebar.file_uploader("Upload your CSV file", type=['csv'])
 
     # Performance settings
-    st.sidebar.header("⚡ Performance Settings")
+    st.sidebar.header("Performance Settings")
     max_sample_size = st.sidebar.selectbox(
         "Sample Size for Analysis",
         [25000, 50000, 100000, 200000],
@@ -604,13 +1459,14 @@ def main():
     if uploaded_file is not None:
         # Load data with sampling
         with st.spinner("Loading and sampling data..."):
-            df, total_rows = load_and_sample_data(uploaded_file, max_sample_size)
+            df, total_rows = load_and_sample_data(uploaded_file, max_sample_size, game_selection)
 
         if df is not None:
-            st.sidebar.success(f"✅ Data loaded: {len(df):,} of {total_rows:,} rows")
+            st.sidebar.success(f"Data loaded: {len(df):,} of {total_rows:,} rows")
+            st.sidebar.info(f"Game: {game_selection}")
 
             # Data summary
-            st.sidebar.header("📊 Data Summary")
+            st.sidebar.header("Data Summary")
             st.sidebar.metric("Sample Size", f"{len(df):,}")
             st.sidebar.metric("Original Size", f"{total_rows:,}")
             if 'Time' in df.columns:
@@ -620,7 +1476,23 @@ def main():
                 st.sidebar.metric("Avg Speed", f"{df['SPEED'].mean():.1f} km/h")
 
             # Quick filters
-            st.sidebar.header("🔍 Quick Filters")
+            st.sidebar.header("Quick Filters")
+
+            # Lap filter (NEW - add this FIRST)
+            if 'LAP_BEACON' in df.columns:
+                available_laps = sorted(df['LAP_BEACON'].dropna().unique())
+                if len(available_laps) > 1:
+                    lap_filter = st.sidebar.checkbox("Filter by Laps")
+                    if lap_filter:
+                        selected_laps_filter = st.sidebar.multiselect(
+                            "Select Laps to Analyze:",
+                            available_laps,
+                            default=available_laps,
+                            help="Choose specific laps for analysis"
+                        )
+                        if selected_laps_filter:
+                            df = df[df['LAP_BEACON'].isin(selected_laps_filter)]
+                            st.sidebar.success(f"Filtered to {len(selected_laps_filter)} lap(s)")
 
             # Time range filter
             if 'Time' in df.columns:
@@ -640,17 +1512,17 @@ def main():
                     df = df[df['SPEED'] >= min_speed]
 
             # Extract lap data for comparison
-            lap_data = extract_lap_data(df)
+            lap_data = extract_lap_data(df, 3)
 
             # Main content tabs
             if lap_data and len(lap_data) >= 2:
-                tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-                    "🏁 Performance", "🛞 Tires", "🟥 Brakes", "🌊 G-Forces", "🏆 Lap Comparison", "📈 Data"
+                tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+                    "Performance", "Tires", "Brakes", "G-Forces", "Lap Comparison", "AI Assistant", "Data"
                 ])
                 has_lap_comparison = True
             else:
-                tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                    "🏁 Performance", "🛞 Tires", "🟥 Brakes", "🌊 G-Forces", "📈 Data"
+                tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                    "Performance", "Tires", "Brakes", "G-Forces", "AI Assistant", "Data"
                 ])
                 has_lap_comparison = False
 
@@ -672,7 +1544,144 @@ def main():
                     if 'BRAKE' in df.columns:
                         st.metric("Avg Brake", f"{df['BRAKE'].mean():.1f}%")
 
+                # Lap Times Analysis Section (NEW)
+                if lap_data and len(lap_data) >= 2:
+                    st.subheader("Lap Times & Sector Analysis")
+
+                    # Sector configuration
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        num_sectors = st.selectbox(
+                            "Sectors per lap:",
+                            [3, 4, 5],
+                            index=0,
+                            key="perf_sectors",
+                            help="Number of sectors to divide each lap"
+                        )
+
+                    # Re-extract lap data with selected number of sectors
+                    with st.spinner("Calculating sector times..."):
+                        lap_data_with_sectors = extract_lap_data(df, num_sectors)
+
+                    if lap_data_with_sectors:
+                        # Create lap times table
+                        lap_table = create_lap_times_table_with_sectors(lap_data_with_sectors, num_sectors)
+
+                        if lap_table is not None:
+                            # Style the table to highlight best times
+                            styled_table, best_lap_idx, best_sectors = highlight_best_sectors_and_times(lap_table, num_sectors)
+
+                            # Display metrics for best performance
+                            col1, col2, col3 = st.columns(3)
+
+                            with col1:
+                                if best_lap_idx >= 0:
+                                    best_lap_num = lap_table.iloc[best_lap_idx]['Lap']
+                                    best_time = lap_table.iloc[best_lap_idx]['Lap Time']
+                                    st.success(f"**Best Lap**: {best_lap_num}\n\n**Time**: {best_time}")
+
+                            with col2:
+                                if len(lap_table) > 1:
+                                    all_times = [parse_time_to_seconds(t) for t in lap_table['Lap Time'] if
+                                                 parse_time_to_seconds(t) < float('inf')]
+                                    if all_times:
+                                        avg_time = sum(all_times) / len(all_times)
+                                        st.info(f"**Average Lap**: {format_time_mmss(avg_time)}")
+
+                            with col3:
+                                if len(lap_table) > 1:
+                                    all_times = [parse_time_to_seconds(t) for t in lap_table['Lap Time'] if
+                                                 parse_time_to_seconds(t) < float('inf')]
+                                    if all_times:
+                                        consistency = np.std(all_times)
+                                        st.info(f"**Consistency**: ±{consistency:.3f}s")
+
+                            # Display the table with custom formatting
+                            st.markdown("### Lap Times & Sectors Table")
+
+                            # Convert table to HTML for better formatting
+                            def style_lap_table(df_table, best_lap_idx, best_sectors, num_sectors):
+                                """Apply HTML styling to highlight best times"""
+                                html = "<table style='width:100%; border-collapse: collapse;'>"
+
+                                # Header
+                                html += "<tr style='background-color: #f0f0f0; font-weight: bold;'>"
+                                for col in df_table.columns:
+                                    html += f"<th style='border: 1px solid #ddd; padding: 8px; text-align: center;'>{col}</th>"
+                                html += "</tr>"
+
+                                # Rows
+                                for idx, row in df_table.iterrows():
+                                    row_style = "background-color: #fff9c4;" if idx == best_lap_idx else ""
+                                    html += f"<tr style='{row_style}'>"
+
+                                    for col_idx, (col, value) in enumerate(row.items()):
+                                        cell_style = "border: 1px solid #ddd; padding: 8px; text-align: center;"
+
+                                        # Highlight best sectors
+                                        if col.startswith('Sector') and col in best_sectors:
+                                            if 'N/A' not in str(value):
+                                                current_time = parse_time_to_seconds(str(value))
+                                                if abs(current_time - best_sectors[col]) < 0.001:
+                                                    cell_style += " background-color: #90EE90; font-weight: bold;"
+
+                                        # Highlight best lap time
+                                        if col == 'Lap Time' and idx == best_lap_idx:
+                                            cell_style += " background-color: #FFD700; font-weight: bold;"
+
+                                        html += f"<td style='{cell_style}'>{value}</td>"
+
+                                    html += "</tr>"
+
+                                html += "</table>"
+                                return html
+
+                            # Display styled table
+                            table_html = style_lap_table(lap_table, best_lap_idx, best_sectors, num_sectors)
+                            st.markdown(table_html, unsafe_allow_html=True)
+
+                            # Add legend
+                            st.markdown("""
+                            <div style='margin-top: 10px; font-size: 0.9em;'>
+                            <span style='background-color: #FFD700; padding: 2px 6px; border-radius: 3px;'>Gold = Best Lap Time</span> | 
+                            <span style='background-color: #90EE90; padding: 2px 6px; border-radius: 3px;'>Green = Best Sector Time</span> | 
+                            <span style='background-color: #fff9c4; padding: 2px 6px; border-radius: 3px;'>Yellow = Best Overall Lap</span>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                            # Lap progression chart
+                            st.subheader("Lap Time Progression")
+                            lap_chart = create_lap_times_chart(lap_data_with_sectors)
+                            if lap_chart:
+                                st.plotly_chart(lap_chart, use_container_width=True)
+
+                            # Best sectors summary
+                            st.subheader("Best Sector Times Summary")
+                            best_sector_data = []
+                            for sector in range(1, num_sectors + 1):
+                                sector_col = f'Sector {sector}'
+                                if sector_col in best_sectors:
+                                    # Find which lap achieved this best sector
+                                    best_time = best_sectors[sector_col]
+                                    best_lap = None
+                                    for _, row in lap_table.iterrows():
+                                        if 'N/A' not in str(row[sector_col]):
+                                            if abs(parse_time_to_seconds(row[sector_col]) - best_time) < 0.001:
+                                                best_lap = row['Lap']
+                                                break
+
+                                    best_sector_data.append({
+                                        'Sector': f'Sector {sector}',
+                                        'Best Time': f"{best_time:.3f}s",
+                                        'Achieved in Lap': best_lap or 'Unknown'
+                                    })
+
+                            if best_sector_data:
+                                best_sectors_df = pd.DataFrame(best_sector_data)
+                                st.dataframe(best_sectors_df, use_container_width=True, hide_index=True)
+
                 # Fast performance charts
+                st.subheader("Telemetry Analysis")
                 with st.spinner("Generating performance charts..."):
                     speed_fig = create_fast_speed_analysis(df)
                     if speed_fig:
@@ -723,7 +1732,7 @@ def main():
             # Lap Comparison Tab (only if lap data exists)
             if has_lap_comparison:
                 with tab5:
-                    st.header("🏆 Lap Comparison Analysis")
+                    st.header("Lap Comparison Analysis")
 
                     if lap_data and len(lap_data) >= 2:
                         # Lap selection interface
@@ -742,7 +1751,7 @@ def main():
 
                         with col2:
                             if selected_laps and len(selected_laps) >= 2:
-                                st.success(f"✅ {len(selected_laps)} laps selected for comparison")
+                                st.success(f"Comparing {len(selected_laps)} laps")
 
                                 # Quick lap overview
                                 for lap in selected_laps[:3]:  # Show first 3
@@ -755,20 +1764,20 @@ def main():
 
                         if selected_laps and len(selected_laps) >= 2:
                             # Lap Statistics Overview
-                            st.subheader("📊 Lap Statistics Comparison")
+                            st.subheader("Lap Statistics Comparison")
                             stats_table = create_lap_statistics_table(lap_data, selected_laps)
                             if stats_table is not None:
                                 st.dataframe(stats_table, use_container_width=True)
 
                             # Performance comparison charts
-                            st.subheader("📈 Performance Comparison")
+                            st.subheader("Performance Comparison")
                             with st.spinner("Generating lap comparison charts..."):
                                 comparison_fig = create_lap_comparison_charts(lap_data, selected_laps)
                                 if comparison_fig:
                                     st.plotly_chart(comparison_fig, use_container_width=True)
 
                             # Sector Analysis
-                            st.subheader("🎯 Sector Analysis")
+                            st.subheader("Sector Analysis")
                             col1, col2 = st.columns([1, 3])
 
                             with col1:
@@ -781,27 +1790,26 @@ def main():
 
                             with col2:
                                 with st.spinner("Analyzing sectors..."):
-                                    sector_fig, sector_data = create_sector_analysis(lap_data, selected_laps,
-                                                                                     num_sectors)
-                                    if sector_fig:
+                                    sector_result = create_sector_analysis(lap_data, selected_laps, num_sectors)
+                                    if sector_result:
+                                        sector_fig, sector_data = sector_result
                                         st.plotly_chart(sector_fig, use_container_width=True)
 
-                            # Sector data table
-                            if sector_data is not None:
-                                st.subheader("📋 Sector Performance Data")
-                                st.dataframe(sector_data, use_container_width=True)
+                                        # Sector data table
+                                        st.subheader("Sector Performance Data")
+                                        st.dataframe(sector_data, use_container_width=True)
 
-                                # Best sector times
-                                st.subheader("🏅 Best Sector Times")
-                                best_sectors = sector_data.groupby('Sector')['Time'].min().reset_index()
-                                best_sectors['Best_Lap'] = sector_data.loc[
-                                    sector_data.groupby('Sector')['Time'].idxmin(), 'Lap'
-                                ].values
-                                best_sectors.columns = ['Sector', 'Best Time (s)', 'Best Lap']
-                                st.dataframe(best_sectors, use_container_width=True)
+                                        # Best sector times
+                                        st.subheader("Best Sector Times")
+                                        best_sectors = sector_data.groupby('Sector')['Time'].min().reset_index()
+                                        best_sectors['Best_Lap'] = sector_data.loc[
+                                            sector_data.groupby('Sector')['Time'].idxmin(), 'Lap'
+                                        ].values
+                                        best_sectors.columns = ['Sector', 'Best Time (s)', 'Best Lap']
+                                        st.dataframe(best_sectors, use_container_width=True)
 
-                            # Lap improvement suggestions
-                            st.subheader("💡 Performance Insights")
+                            # Performance insights
+                            st.subheader("Performance Insights")
 
                             if len(selected_laps) >= 2:
                                 # Find fastest and slowest lap
@@ -814,16 +1822,16 @@ def main():
                                 col1, col2, col3 = st.columns(3)
 
                                 with col1:
-                                    st.info(f"🥇 **Fastest Lap**: {fastest_lap}\n\nTime: {lap_times[fastest_lap]:.3f}s")
+                                    st.info(f"**Fastest Lap**: {fastest_lap}\n\nTime: {lap_times[fastest_lap]:.3f}s")
 
                                 with col2:
-                                    st.info(f"🐌 **Slowest Lap**: {slowest_lap}\n\nTime: {lap_times[slowest_lap]:.3f}s")
+                                    st.info(f"**Slowest Lap**: {slowest_lap}\n\nTime: {lap_times[slowest_lap]:.3f}s")
 
                                 with col3:
-                                    st.info(f"⏱️ **Time Difference**: {time_diff:.3f}s\n\nImprovement potential!")
+                                    st.info(f"**Time Difference**: {time_diff:.3f}s")
 
                                 # Performance recommendations
-                                st.markdown("### 🎯 Improvement Opportunities")
+                                st.markdown("### Improvement Opportunities")
 
                                 fastest_data = lap_data[fastest_lap]
                                 slowest_data = lap_data[slowest_lap]
@@ -834,23 +1842,23 @@ def main():
                                     speed_diff = fastest_data['max_speed'] - slowest_data['max_speed']
                                     if speed_diff > 5:
                                         recommendations.append(
-                                            f"🚀 Top speed: Fastest lap achieved {speed_diff:.1f} km/h higher max speed")
+                                            f"Top speed: Fastest lap achieved {speed_diff:.1f} km/h higher max speed")
 
                                 if 'avg_throttle' in fastest_data and 'avg_throttle' in slowest_data:
                                     throttle_diff = fastest_data['avg_throttle'] - slowest_data['avg_throttle']
                                     if abs(throttle_diff) > 5:
                                         if throttle_diff > 0:
                                             recommendations.append(
-                                                f"⚡ Throttle: Fastest lap used {throttle_diff:.1f}% more throttle on average")
+                                                f"Throttle: Fastest lap used {throttle_diff:.1f}% more throttle on average")
                                         else:
                                             recommendations.append(
-                                                f"🎮 Throttle: Fastest lap used {abs(throttle_diff):.1f}% less throttle - better efficiency")
+                                                f"Throttle: Fastest lap used {abs(throttle_diff):.1f}% less throttle - better efficiency")
 
                                 if 'max_combined_g' in fastest_data and 'max_combined_g' in slowest_data:
                                     g_diff = fastest_data['max_combined_g'] - slowest_data['max_combined_g']
                                     if g_diff > 0.1:
                                         recommendations.append(
-                                            f"🌪️ Cornering: Fastest lap pulled {g_diff:.2f}g more - better cornering speed")
+                                            f"Cornering: Fastest lap pulled {g_diff:.2f}g more - better cornering speed")
 
                                 if recommendations:
                                     for rec in recommendations:
@@ -862,8 +1870,14 @@ def main():
                         st.warning("Lap comparison requires at least 2 complete laps with LAP_BEACON data.")
                         st.info("Make sure your CSV file contains a 'LAP_BEACON' column with lap numbers.")
 
+            # AI Assistant Tab
+            ai_tab = tab6 if has_lap_comparison else tab5
+            with ai_tab:
+                st.header("AI Racing Assistant")
+                render_ai_chat_interface(df, lap_data, game_selection)
+
             # Data tab (always last)
-            data_tab = tab6 if has_lap_comparison else tab5
+            data_tab = tab7 if has_lap_comparison else tab6
             with data_tab:
                 st.header("Data Explorer")
 
@@ -900,10 +1914,10 @@ def main():
             st.error("Failed to load the data. Please check your CSV file format.")
 
     else:
-        st.info("👆 Please upload a CSV file to get started!")
+        st.info("Please upload a CSV file to get started!")
 
         # Performance tips
-        st.subheader("🚀 Performance Tips")
+        st.subheader("Performance Tips")
         st.write("""
         - **Adjust sample size** in the sidebar based on your needs
         - **Use time range filter** to focus on specific segments  
