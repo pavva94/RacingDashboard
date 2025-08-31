@@ -1016,18 +1016,23 @@ def extract_lap_data(df, num_sectors=3):
 
             # Calculate sector times
             total_time = lap_df['LAP_TIME'].max()
-            sector_time = total_time / num_sectors
+            sector_duration = total_time / num_sectors
 
             for sector in range(num_sectors):
-                start_time = sector * sector_time
-                end_time = (sector + 1) * sector_time
+                start_time = sector * sector_duration
+                end_time = (sector + 1) * sector_duration
 
                 sector_df = lap_df[(lap_df['LAP_TIME'] >= start_time) &
                                    (lap_df['LAP_TIME'] <= end_time)]
 
                 if len(sector_df) > 0:
+                    # Calculate actual time spent in this sector based on data points
+                    actual_sector_time = sector_df['LAP_TIME'].max() - sector_df['LAP_TIME'].min()
+                    if actual_sector_time <= 0:
+                        actual_sector_time = sector_duration
+
                     lap_stats['sectors'][f'S{sector + 1}'] = {
-                        'time': end_time - start_time,
+                        'time': actual_sector_time,
                         'avg_speed': sector_df['SPEED'].mean() if 'SPEED' in sector_df else 0,
                         'max_speed': sector_df['SPEED'].max() if 'SPEED' in sector_df else 0,
                         'avg_throttle': sector_df['THROTTLE'].mean() if 'THROTTLE' in sector_df else 0
